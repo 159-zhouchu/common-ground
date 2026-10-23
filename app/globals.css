@@ -1,0 +1,23 @@
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--text);font-family:Inter,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;font-synthesis:none}
+body{margin:0;font-size:var(--text-base);line-height:1.7}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none;touch-action:manipulation}
+button:disabled{cursor:not-allowed;opacity:1;color:var(--muted);background:var(--surface-hover);border-color:var(--border)}
+a{color:inherit}
+input,textarea,select{outline:0;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--surface);padding:10px 12px;min-width:0}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:var(--focus)}
+textarea{resize:vertical;line-height:1.9}
+input::placeholder,textarea::placeholder{color:var(--muted)}
+button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+svg{flex-shrink:0;vertical-align:middle}
+h1,h2,h3,h4,p{margin:0}
+::selection{background:var(--accent-soft)}
+mark{color:inherit;background:var(--mark-bg);border-bottom:1px solid var(--mark-border);border-radius:2px}
+.brand-mark{width:26px;height:26px;display:grid;grid-template-columns:1fr 1fr;gap:3px;flex-shrink:0}
+.brand-mark i{background:var(--accent);border-radius:3px}
+.brand-mark i:nth-child(2),.brand-mark i:nth-child(3){opacity:.5}
+.spin{animation:spin 1.3s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
