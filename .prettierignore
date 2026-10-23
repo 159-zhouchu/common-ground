@@ -1,0 +1,7 @@
+node_modules/
+.next/
+.data/
+qa/
+docs/evidence/
+package-lock.json
+next-env.d.ts

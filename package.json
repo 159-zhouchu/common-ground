@@ -1,0 +1,42 @@
+{
+  "name": "common-ground",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 3210",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3210",
+    "test": "tsx --test tests/*.test.ts",
+    "test:http": "node tests/http-smoke.mjs",
+    "test:agent": "node tests/agent-http.mjs",
+    "agent": "node scripts/agent-bridge.mjs",
+    "agent:mcp": "node scripts/agent-mcp.mjs",
+    "test:launcher": "node tests/launcher-smoke.mjs",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"app/**/*.{ts,tsx}\" \"lib/**/*.ts\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.{json,ts}\"",
+    "format:check": "prettier --check \"app/**/*.{ts,tsx}\" \"lib/**/*.ts\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.{json,ts}\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "docx": "^9.5.0",
+    "lucide-react": "^0.468.0",
+    "mammoth": "^1.11.0",
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "prettier": "3.8.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.9.0"
+  }
+}
