@@ -536,7 +536,7 @@
     },
     {
       "path": "node_modules/body-parser",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "license": "MIT",
       "optional": false,
       "dev": false
@@ -1151,6 +1151,13 @@
       "dev": false
     },
     {
+      "path": "node_modules/pend",
+      "version": "1.2.0",
+      "license": "MIT",
+      "optional": false,
+      "dev": false
+    },
+    {
       "path": "node_modules/picocolors",
       "version": "1.1.1",
       "license": "ISC",
@@ -1510,6 +1517,13 @@
     {
       "path": "node_modules/xmlbuilder",
       "version": "10.1.1",
+      "license": "MIT",
+      "optional": false,
+      "dev": false
+    },
+    {
+      "path": "node_modules/yauzl",
+      "version": "3.4.0",
       "license": "MIT",
       "optional": false,
       "dev": false
