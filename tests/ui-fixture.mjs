@@ -52,6 +52,33 @@ const mock = http.createServer(async (req, res) => {
         ready: true,
       }
     : exampleReview();
+  if (input.input?.reviewSpec) {
+    const spec = input.input.reviewSpec,
+      blocks = input.input.blocks;
+    output.findings = output.findings.filter(
+      (f) => spec.mode !== 'blocks' || spec.blockIds.includes(f.blockId),
+    );
+    output.assessments = spec.criteria.map((c, i) => ({
+      criterionId: c.id,
+      verdict: i % 3 === 0 ? 'passed' : i % 3 === 1 ? 'needs_revision' : 'insufficient',
+      reason: '隔离验收的本机模拟结果，不代表真实模型判断。',
+      evidence: [
+        {
+          blockId: spec.mode === 'blocks' ? spec.blockIds[0] : blocks[0].id,
+          sourceId: '',
+          quote: blocks
+            .find((b) => b.id === (spec.mode === 'blocks' ? spec.blockIds[0] : blocks[0].id))
+            .content.slice(0, 20),
+        },
+      ],
+    }));
+    const revisionCriterion = output.assessments.find((a) => a.verdict === 'needs_revision');
+    output.findings = revisionCriterion
+      ? output.findings
+          .slice(0, 1)
+          .map((f) => ({ ...f, criterionId: revisionCriterion.criterionId }))
+      : [];
+  }
   await new Promise((r) => setTimeout(r, 3000));
   if (raw.includes('模拟失败')) {
     res.writeHead(401);

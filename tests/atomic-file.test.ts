@@ -11,6 +11,7 @@ test('原子写盘短暂冲突重试，永久错误保留旧文件并清理独�
     rename = fs.renameSync;
   try {
     writeAtomic(file, { old: true });
+    if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     let attempts = 0;
     const temps = new Set<string>();
     let stub = mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
