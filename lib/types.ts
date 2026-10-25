@@ -21,6 +21,8 @@ export type Revision = {
   parentId?: string;
 };
 export type Finding = {
+  criterionId?: string;
+  supersededBy?: string;
   id: string;
   title: string;
   kind: string;
@@ -49,6 +51,19 @@ export type Message = {
   createdAt: string;
   runId?: string;
 };
+export type ReviewCriterion = { id: string; title: string; standard: string };
+export type ReviewSpec = {
+  mode: 'whole' | 'blocks' | 'focus';
+  blockIds: string[];
+  focus: string;
+  criteria: ReviewCriterion[];
+};
+export type Assessment = {
+  criterionId: string;
+  verdict: 'passed' | 'needs_revision' | 'insufficient';
+  reason: string;
+  evidence: { blockId: string; sourceId: string; quote: string }[];
+};
 export type Manifest = {
   goal: string;
   constraint: string;
@@ -58,6 +73,7 @@ export type Manifest = {
   mode: 'continue' | 'source_only';
   excluded: string[];
   priorOutputs?: Review[];
+  reviewSpec?: ReviewSpec;
   hash: string;
 };
 export type ConnectionSnapshot = {
@@ -94,6 +110,10 @@ export type Step = {
   sent?: boolean;
 };
 export type Run = {
+  requestFingerprint?: string;
+  reviewSpec?: ReviewSpec;
+  assessments?: Assessment[];
+  reviewBasis?: { goal: string; sources: { id: string; version: number }[] };
   discussionQuestion?: string;
   roleAssignments?: RoleAssignments;
   connectionSnapshots?: ConnectionSnapshot[];
@@ -159,8 +179,10 @@ export type Connection = {
   outputPrice: number | null;
 };
 export type Review = {
+  assessments?: Assessment[];
   summary: string;
   findings: {
+    criterionId?: string;
     title: string;
     kind: string;
     severity: 'high' | 'medium' | 'low';
@@ -201,6 +223,8 @@ export type PublicConnection = Omit<Connection, 'apiKey'> & {
   lastTest: ConnectionTest | null;
 };
 export type RunOptions = {
+  reviewSpec?: ReviewSpec;
+  baseRevision?: string;
   roleAssignments?: RoleAssignments;
   compareRole?: 'a' | 'b';
   strategy: StrategyId;

@@ -1,4 +1,4 @@
-import type { Task, Revision, Block, Manifest, RunOptions, Step } from './types';
+import type { Task, Revision, Block, Manifest, RunOptions, Step, ReviewSpec } from './types';
 import {
   MAX_MODEL_INPUT_BYTES,
   MAX_DOCUMENT_MULTISTEP_BYTES,
@@ -26,9 +26,11 @@ export function manifestContent(
   revision: Revision,
   mode: Manifest['mode'],
   draft?: Block[],
+  reviewSpec?: ReviewSpec,
 ): Omit<Manifest, 'hash'> {
   return {
     goal: task.goal,
+    ...(reviewSpec ? { reviewSpec } : {}),
     constraint: revision.constraint,
     sources: task.sources.map((s) => ({ id: s.id, version: s.version, text: s.text })),
     blocks: mode === 'continue' ? (draft ?? revision.blocks) : [],
@@ -69,7 +71,10 @@ export function documentInputBudget(task: Task, opts: RunOptions) {
   const sizes = steps.map((step) => {
     const mode = step.duty === 'compare' ? 'continue' : opts.contextMode;
     // Every SHA-256 hex digest is 64 ASCII bytes; its value cannot affect size.
-    const input = { ...manifestContent(task, revision, mode), hash: '0'.repeat(64) };
+    const input = {
+      ...manifestContent(task, revision, mode, undefined, opts.reviewSpec),
+      hash: '0'.repeat(64),
+    };
     const bytes = new TextEncoder().encode(
       JSON.stringify(reviewInput(input, step.duty)),
     ).byteLength;

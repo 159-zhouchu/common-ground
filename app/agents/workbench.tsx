@@ -158,6 +158,7 @@ export default function AgentWorkbench() {
   useEffect(() => {
     let cancelled = false;
     const seq = ++sequence.current;
+    let timer: ReturnType<typeof setTimeout>;
     async function load() {
       try {
         const [list, bin] = await Promise.all([call('agent/jobs'), call('agent/archived')]);
@@ -171,13 +172,15 @@ export default function AgentWorkbench() {
         } else setJob(null);
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
+      } finally {
+        // Start the next poll only after this list/detail cycle finishes.
+        if (!cancelled) timer = setTimeout(load, job?.state === 'running' ? 1500 : 8000);
       }
     }
     load();
-    const timer = setInterval(load, job?.state === 'running' ? 1500 : 8000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, [id, job?.state, newView, refresh]);
   const available = connections.filter((c) => c.enabled && c.configured),
@@ -368,7 +371,7 @@ export default function AgentWorkbench() {
   return (
     <div className="ag-stage">
       <div className="ag-shell">
-        <main className="ag-page">
+        <main className="ag-page" id="main-content" tabIndex={-1}>
           <div className="ag-breadcrumb">
             <span>
               工作空间 <span className="ag-slash">/</span> AI 协作中转台

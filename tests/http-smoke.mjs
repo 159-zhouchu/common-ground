@@ -38,11 +38,29 @@ const mock = http.createServer(async (req, res) => {
   for await (const chunk of req) raw += chunk;
   probeRequests.push({ url: req.url, body: JSON.parse(raw), auth: req.headers.authorization });
   res.setHeader('Content-Type', 'application/json');
+  if (JSON.parse(raw).model === 'oversized-envelope') {
+    res.end(
+      JSON.stringify({ padding: 'x'.repeat(1024 * 1024), secret: 'MOCK_SECRET_MUST_NOT_LEAK' }),
+    );
+    return;
+  }
   if (req.url.startsWith('/denied')) {
     res.writeHead(401);
     res.end(JSON.stringify({ error: 'MOCK_SECRET_MUST_NOT_LEAK' }));
     return;
   }
+  const body = JSON.parse(raw),
+    input = JSON.parse(body.input?.[0]?.content || body.messages?.[1]?.content || '{}').input;
+  const output = { summary: 'OK', findings: [], questions: [] };
+  if (input?.reviewSpec)
+    output.assessments = input.reviewSpec.criteria.map((c) => ({
+      criterionId: c.id,
+      verdict: 'passed',
+      reason: '仅验证协议',
+      evidence: [
+        { blockId: input.blocks[0].id, sourceId: '', quote: input.blocks[0].content.slice(0, 10) },
+      ],
+    }));
   res.end(
     JSON.stringify({
       status: 'completed',
@@ -51,7 +69,7 @@ const mock = http.createServer(async (req, res) => {
           content: [
             {
               type: 'output_text',
-              text: JSON.stringify({ summary: 'OK', findings: [], questions: [] }),
+              text: JSON.stringify(output),
             },
           ],
         },
@@ -59,7 +77,7 @@ const mock = http.createServer(async (req, res) => {
       choices: [
         {
           finish_reason: 'stop',
-          message: { content: JSON.stringify({ summary: 'OK', findings: [], questions: [] }) },
+          message: { content: JSON.stringify(output) },
         },
       ],
       usage: { input_tokens: 70, output_tokens: 20, prompt_tokens: 70, completion_tokens: 20 },
@@ -118,6 +136,15 @@ try {
       413,
     );
   checks.push('无 Content-Length 的超大 JSON 与材料上传返回 413');
+  const beforeInvalid = await call('workspace');
+  for (const route of ['settings', 'connections/save', 'connections/delete', 'save', 'message'])
+    for (const raw of ['null', '[]', 'true', '42', '"text"'])
+      assert.equal(
+        await rawRequest('POST', route, { 'Content-Type': 'application/json' }, [raw]),
+        400,
+      );
+  assert.deepEqual(await call('workspace'), beforeInvalid);
+  checks.push('JSON 非对象请求统一返回 400，工作区与连接完全不变');
   let ws = await call('workspace');
   const sample = ws.tasks[0];
   const run = await call('runs', {
@@ -367,6 +394,26 @@ try {
   assert.ok(!history.includes('MOCK_SECRET'));
   assert.equal(JSON.parse(history).length, 3);
   checks.push('兼容 Chat 协议测试通过；独立测试日志记录费用和失败且不含密钥');
+  const oversized = await call(
+    'connections/test',
+    {
+      connection: { ...safe[0], apiKey: '', model: 'oversized-envelope' },
+      confirmCall: true,
+    },
+    502,
+  );
+  assert.equal(oversized.code, 'PROVIDER_RESPONSE_TOO_LARGE');
+  assert.ok(!JSON.stringify(oversized).includes('MOCK_SECRET'));
+  assert.equal(
+    (
+      await call('connections/test', {
+        connection: { ...safe[0], apiKey: '' },
+        confirmCall: true,
+      })
+    ).success,
+    true,
+  );
+  checks.push('真实 HTTP 模拟供应商超大信封被拒绝，不泄漏原文，随后正常请求成功');
   await call('settings', {
     connections: safe.map((c) => ({ ...c, apiKey: '', clearKey: c.slot === 'a' })),
   });
@@ -419,6 +466,7 @@ try {
       taskId: created.id,
       connectionId: '',
       text: '空选择不能回退旧 A',
+      base: created.currentRevision,
       idempotencyKey: randomUUID(),
     },
     400,
@@ -432,6 +480,7 @@ try {
       taskId: created.id,
       connectionId: selected.connectionId,
       text: '不应发送',
+      base: created.currentRevision,
       idempotencyKey: randomUUID(),
     },
     400,
@@ -442,6 +491,7 @@ try {
     taskId: created.id,
     connectionId: selected.connectionId,
     text: '只向所选连接讨论',
+    base: created.currentRevision,
     idempotencyKey: randomUUID(),
   });
   let discussionRun;
@@ -458,8 +508,27 @@ try {
   assert.equal(probeRequests.at(-1).body.model, selected.model);
   assert.equal(discussionRun.steps[0].connectionId, selected.connectionId);
   checks.push('讨论只调用指定动态连接；停用后不自动改用其他模型');
+  const replayDiscussion = {
+    taskId: created.id,
+    connectionId: selected.connectionId,
+    text: '只向所选连接讨论',
+    base: created.currentRevision,
+    idempotencyKey: discussion.id,
+  };
+  await call('connections/save', { connection: { ...selected, apiKey: '', enabled: false } });
+  assert.equal((await call('message', replayDiscussion)).id, discussion.id);
+  const conflict = await call(
+    'message',
+    { ...replayDiscussion, connectionId: safe[0].connectionId },
+    409,
+  );
+  assert.equal(conflict.code, 'IDEMPOTENCY_CONFLICT');
+  await call('connections/save', { connection: { ...selected, apiKey: '', enabled: true } });
   await call('connections/save', { connection: { ...selected, label: '重新命名', apiKey: '' } });
   await call('connections/delete', { connectionId: selected.connectionId });
+  assert.equal((await call('message', replayDiscussion)).id, discussion.id);
+  assert.equal(probeRequests.length, originalCalls + 1);
+  checks.push('讨论同键重放在停用或删除连接后仍返回历史；换接收方冲突且不额外调用');
   ws = await call('workspace');
   const historical = ws.tasks
     .find((t) => t.id === created.id)
@@ -519,6 +588,108 @@ try {
   );
   assert.equal(messages[0].content, '只向所选连接讨论');
   checks.push('HTTP 讨论成功后成对写入，未配置请求不留下孤立消息');
+  const { defaultReviewSpec } = await import('../lib/review-scope.ts');
+  const spec = defaultReviewSpec(),
+    reviewTask = await call('task-detail?taskId=' + created.id);
+  const reviewPayload = {
+    taskId: created.id,
+    strategy: 'S0',
+    mode: 'live',
+    contextMode: 'continue',
+    selfCheck: false,
+    slot: 'a',
+    roleAssignments: { a: safe[0].connectionId },
+    budget: null,
+    reviewSpec: spec,
+    base: reviewTask.currentRevision,
+  };
+  const beforeScoped = probeRequests.length;
+  await call('runs', { ...reviewPayload, base: undefined, idempotencyKey: randomUUID() }, 400);
+  await call('runs', { ...reviewPayload, base: 'stale', idempotencyKey: randomUUID() }, 409);
+  await call(
+    'runs',
+    {
+      ...reviewPayload,
+      reviewSpec: { ...spec, mode: 'blocks', blockIds: ['deleted'] },
+      idempotencyKey: randomUUID(),
+    },
+    400,
+  );
+  assert.equal(probeRequests.length, beforeScoped);
+  checks.push('定向审查缺少版本、版本冲突、已删除段落在付费请求前拦截');
+  const scoped = await call('runs', { ...reviewPayload, idempotencyKey: randomUUID() });
+  let scopedTask;
+  for (let i = 0; i < 100; i++) {
+    scopedTask = await call('task-detail?taskId=' + created.id);
+    if (scopedTask.runs.find((r) => r.id === scoped.id).state !== 'running') break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.equal(scopedTask.runs.at(-1).state, 'succeeded');
+  assert.equal(scopedTask.runs.at(-1).assessments[0].verdict, 'passed');
+  const scopedSummary = (await call('workspace?view=summary')).tasks.find(
+    (t) => t.id === created.id,
+  );
+  assert.equal(scopedSummary.runs.at(-1).assessments[0].verdict, 'passed');
+  assert.ok(!scopedSummary.runs.at(-1).steps[0].manifest);
+  checks.push('定向真实协议成功回传分项结论，轻量轮询保留范围与结论');
+  for (const format of ['md', 'docx']) {
+    const exported = await fetch(
+      base + `/api/export?taskId=${created.id}&review=true&format=${format}`,
+    );
+    assert.equal(exported.status, 200);
+    const text =
+      format === 'md'
+        ? await exported.text()
+        : (await mammoth.extractRawText({ buffer: Buffer.from(await exported.arrayBuffer()) }))
+            .value;
+    assert.match(text, /分项审查记录/);
+    assert.match(text, /目标与约束/);
+    assert.match(text, /通过/);
+  }
+  checks.push('Markdown 和 DOCX 导出保留分项验收标准、结论和版本');
+  const callsBeforeGuards = probeRequests.length;
+  const replay = await call('runs', { ...reviewPayload, idempotencyKey: scoped.id });
+  assert.equal(replay.id, scoped.id);
+  await call('runs', { ...reviewPayload, budget: 1, idempotencyKey: scoped.id }, 409);
+  assert.equal(probeRequests.length, callsBeforeGuards);
+  checks.push('文稿请求同键重放不重复调用，改参数返回 409');
+  await call(
+    'message',
+    {
+      taskId: created.id,
+      text: '旧页面',
+      base: 'stale',
+      connectionId: safe[0].connectionId,
+      idempotencyKey: randomUUID(),
+    },
+    409,
+  );
+  await call(
+    'message',
+    {
+      taskId: created.id,
+      text: '缺版本',
+      connectionId: safe[0].connectionId,
+      idempotencyKey: randomUUID(),
+    },
+    400,
+  );
+  assert.equal(probeRequests.length, callsBeforeGuards);
+  checks.push('讨论缺版本或旧版本在模型调用前拦截');
+  const existingFinding = (await call('task-detail?taskId=' + task.id)).findings[0];
+  for (const decision of ['rejected', 'deferred', 'pending'])
+    await call('patch', { taskId: task.id, id: existingFinding.id, base: 'stale', decision }, 409);
+  checks.push('拒绝、暂缓与恢复待办均拒绝旧标签页版本');
+  for (const contentType of ['text/plain', 'multipart/form-data; boundary=missing']) {
+    const response = await fetch(base + '/api/material', {
+      method: 'POST',
+      headers: { 'Content-Type': contentType },
+      body: 'invalid form',
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_MULTIPART');
+  }
+  checks.push('畸形上传表单返回 400 而非内部错误');
   const report = {
     at: new Date().toISOString(),
     scope: '本机生产构建的隔离 HTTP 集成测试；没有真实模型调用或用户效果评测',

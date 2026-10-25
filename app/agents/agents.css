@@ -65,13 +65,13 @@
 .ag-roles label{margin:0;padding:12px 13px 8px;border-radius:6px;gap:4px}
 .ag-roles label>span{display:flex;align-items:center;gap:12px;line-height:1.5;min-height:27px}
 .ag-roles b{color:var(--accent);font-size:12px}
-.ag-roles small{font-size:10px;font-weight:400;margin-left:auto;color:var(--muted)}
-.ag-stage .ag-roles select{background:transparent;border:1px solid transparent;padding:4px 0;color:var(--muted);min-height:30px}
+.ag-roles small{font-size:10px;font-weight:400;margin-left:auto;color:var(--text)}
+.ag-stage .ag-roles select{background:transparent;border:1px solid transparent;padding:4px 0;color:var(--text);min-height:40px}
 .ag-stage .ag-roles select:focus{border-color:var(--accent);box-shadow:none}
 .ag-role-note{margin-top:13px;font-size:11px}
-.ag-role-note a{display:inline-flex;align-items:center;margin-left:5px;gap:2px;text-decoration:none}
+.ag-role-note a{display:inline-flex;align-items:center;margin-left:5px;gap:2px;text-decoration:underline;text-underline-offset:3px}
 .ag-brief .ag-panel-heading{margin-bottom:16px}
-.ag-decision{font-size:11px;line-height:1.5;background:#eeece8;color:var(--muted);padding:4px 12px;border-radius:3px;flex-shrink:0}
+.ag-decision{font-size:11px;line-height:1.5;background:#eeece8;color:var(--text);padding:4px 12px;border-radius:3px;flex-shrink:0}
 .ag-decision.ready{background:#e7eee8;color:#49644e}
 .ag-empty{min-height:92px;padding:4px 0 15px}
 .ag-empty h3{line-height:1.5;font-weight:700}

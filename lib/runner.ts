@@ -6,6 +6,15 @@ import { exampleReview, now } from './seed';
 import { invoke, modelRequest, reserveCost } from './models';
 import { lockConnections, lockTask } from './execution';
 import { documentInputBudget } from './document-input';
+import {
+  ReviewSpecSchema,
+  reviewSpecError,
+  reviewBlockAllowed,
+  checkedAssessments,
+  scopedOutputError,
+  supersedeScopedFindings,
+} from './review-scope';
+import { MAX_MODEL_OUTPUT_BYTES } from './limits';
 const globalRun = globalThis as typeof globalThis & {
   cgControllers?: Map<string, AbortController>;
 };
@@ -25,9 +34,45 @@ export function startRun(
     selfCheck: opts.strategy === 'S0' && opts.selfCheck,
     contextMode: opts.mode === 'demo' ? 'continue' : opts.contextMode,
   };
+  if (opts.reviewSpec) opts.reviewSpec = ReviewSpecSchema.parse(opts.reviewSpec);
+  const requestFingerprint = createHash('sha256')
+    .update(
+      JSON.stringify({
+        strategy: opts.strategy,
+        selfCheck: opts.selfCheck,
+        mode: opts.mode,
+        contextMode: opts.contextMode,
+        slot: opts.slot,
+        compareRole: opts.compareRole || 'a',
+        budget: opts.budget,
+        baseRevision: opts.baseRevision ?? null,
+        roles: opts.roleAssignments
+          ? [opts.roleAssignments.a, opts.roleAssignments.b ?? null]
+          : null,
+        reviewSpec: opts.reviewSpec ?? null,
+        discussionQuestion: discussionQuestion ?? null,
+      }),
+    )
+    .digest('hex');
   const task = getTask(taskId);
   const duplicate = task.runs.find((r) => r.id === idempotencyKey);
-  if (duplicate) return duplicate;
+  if (duplicate) {
+    if (duplicate.requestFingerprint !== requestFingerprint)
+      throw new AppError(
+        'IDEMPOTENCY_CONFLICT',
+        '该请求标识已用于其他参数或旧版记录，请使用新的请求标识。',
+        409,
+      );
+    return duplicate;
+  }
+  if (opts.baseRevision && opts.baseRevision !== task.currentRevision)
+    throw new AppError('REVISION_CONFLICT', '方案已更新，请刷新后按当前版本检查。', 409);
+  if (opts.reviewSpec) {
+    const error = reviewSpecError(opts.reviewSpec, task);
+    if (error) throw new AppError('REVIEW_SCOPE', error);
+    if (opts.contextMode !== 'continue' || discussionQuestion)
+      throw new AppError('REVIEW_SCOPE', '定向审查需要当前方案；讨论与原材料重答请单独运行。');
+  }
   if (task.runs.some((r) => r.state === 'running'))
     throw new AppError('RUN_ACTIVE', '已有运行，请先停止再启动新策略。', 409);
   if (opts.mode === 'demo' && !task.example)
@@ -78,11 +123,21 @@ export function startRun(
     for (const step of steps)
       modelRequest(
         configs[step.slot as 'a' | 'b']!,
-        manifest(task, step.duty === 'compare' ? 'continue' : opts.contextMode),
+        manifest(
+          task,
+          step.duty === 'compare' ? 'continue' : opts.contextMode,
+          undefined,
+          opts.reviewSpec,
+        ),
         step.duty,
       );
   }
   const run: Run = {
+    requestFingerprint,
+    reviewSpec: opts.reviewSpec,
+    reviewBasis: opts.reviewSpec
+      ? { goal: task.goal, sources: task.sources.map(({ id, version }) => ({ id, version })) }
+      : undefined,
     discussionQuestion,
     roleAssignments: opts.mode === 'live' ? mapping : undefined,
     connectionSnapshots: Object.values(configs).map((c) => connectionSnapshot(c!)),
@@ -167,7 +222,7 @@ async function execute(
     const step = run.steps[index];
     const c = configs[step.slot as 'a' | 'b'];
     const mode = step.duty === 'compare' ? 'continue' : run.contextMode;
-    const m = manifest(snapshot, mode);
+    const m = manifest(snapshot, mode, undefined, run.reviewSpec);
     if (prior.length) {
       m.priorOutputs = prior;
       m.hash = createHash('sha256')
@@ -199,6 +254,17 @@ async function execute(
           );
         });
         const review = exampleReview();
+        if (run.reviewSpec) {
+          review.findings = review.findings.filter((f) =>
+            reviewBlockAllowed(run.reviewSpec!, f.blockId),
+          );
+          review.assessments = run.reviewSpec.criteria.map((c) => ({
+            criterionId: c.id,
+            verdict: 'insufficient',
+            reason: '合成示例仅演示预置问题，不判断自定义验收标准。',
+            evidence: [],
+          }));
+        }
         review.findings = review.findings.filter((f) =>
           current(snapshot)
             .blocks.find((b) => b.id === f.blockId)
@@ -248,6 +314,23 @@ async function execute(
         s.usage = result.usage;
         s.cost = result.cost;
         s.requestId = result.requestId;
+      });
+      if (run.reviewSpec) {
+        const error = run.mode === 'live' ? scopedOutputError(run.reviewSpec, result.review) : '';
+        if (error) throw new AppError('REVIEW_SCOPE', error);
+        result.review.assessments = checkedAssessments(snapshot, run.reviewSpec, result.review);
+        if (run.mode === 'live')
+          result.review.findings = result.review.findings.filter((f) =>
+            result.review.assessments!.some(
+              (a) => a.criterionId === f.criterionId && a.verdict === 'needs_revision',
+            ),
+          );
+        if (Buffer.byteLength(JSON.stringify(result.review), 'utf8') > MAX_MODEL_OUTPUT_BYTES)
+          throw new AppError('OUTPUT_TOO_LARGE', '核验后的分项结果超过 9 KB，请减少本次审查项。');
+      }
+      editTask(snapshot.id, (t) => {
+        const r = t.runs.find((r) => r.id === run.id)!;
+        const s = r.steps[index];
         s.output = result.review;
         s.result = result.review.summary;
         s.status = r.state === 'running' ? 'completed' : 'cancelled';
@@ -299,7 +382,9 @@ async function execute(
         : 'failed';
     r.endedAt = now();
     r.summary = result?.summary || '没有取得可用结果，请查看失败记录。';
+    if (result?.assessments && r.state === 'succeeded') r.assessments = result.assessments;
     if (result) {
+      supersedeScopedFindings(t, r);
       const findings = normalizeReview(snapshot, result, r.id, r.baseRevision);
       for (const f of findings) {
         if (
@@ -315,6 +400,8 @@ async function execute(
           !t.findings.some(
             (old) =>
               !old.stale &&
+              old.criterionId === f.criterionId &&
+              (!f.criterionId || old.runId === f.runId) &&
               (old.status === 'pending' || old.status === 'deferred') &&
               old.baseRevision === f.baseRevision &&
               old.sourceId === f.sourceId &&

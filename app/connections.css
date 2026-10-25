@@ -43,5 +43,4 @@
 .api-edit-actions{display:flex;gap:var(--space-3);flex-wrap:wrap;position:sticky;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding-top:var(--space-4);margin-top:var(--space-5)}
 .api-privacy{padding-top:var(--space-5);margin-top:var(--space-5);border-top:1px solid var(--border)}
 .api-empty{color:var(--muted);padding:var(--space-5);text-align:center}
-.api-editor.embedded .api-page-heading h1{font-size:var(--text-lg)}
 @media(max-width:700px){.api-page{padding:var(--space-5) var(--space-4)}.api-page-heading{flex-direction:column}.api-connection-row,.api-edit-form{padding:var(--space-4)}.api-row-actions{gap:var(--space-1)}.api-row-actions button{padding:6px 8px}.api-config-state{margin-left:0}.api-edit-actions{flex-direction:column}.api-edit-actions button{width:100%;min-height:44px}.api-prices{grid-template-columns:1fr}.api-list-toolbar{align-items:center}.api-list-toolbar button{padding:9px 12px}}

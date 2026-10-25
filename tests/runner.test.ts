@@ -26,6 +26,7 @@ let delay = 0,
   reportUsage = true,
   fail = false,
   outputSize = 0;
+let scopeFault: 'none' | 'outside' | 'missing' | 'fake' | 'finding' = 'none';
 const mock = http.createServer(async (req, res) => {
   let raw = '';
   for await (const chunk of req) raw += chunk;
@@ -37,11 +38,59 @@ const mock = http.createServer(async (req, res) => {
     res.end('{}');
     return;
   }
-  const review = {
+  const review: import('../lib/types').Review = {
     summary: '本地协议模拟结果（不代表模型效果）' + 'x'.repeat(outputSize),
     findings: [],
     questions: [],
   };
+  if (m.reviewSpec) {
+    review.assessments = m.reviewSpec.criteria.map((c: { id: string }, i: number) => ({
+      criterionId: c.id,
+      verdict: i ? 'needs_revision' : 'passed',
+      reason: '本机模拟的分项判断',
+      evidence: [
+        {
+          blockId: m.reviewSpec.mode === 'blocks' ? m.reviewSpec.blockIds[0] : m.blocks[0].id,
+          sourceId: '',
+          quote:
+            scopeFault === 'fake'
+              ? '不存在的原文'
+              : m.blocks
+                  .find(
+                    (b: { id: string }) =>
+                      b.id ===
+                      (m.reviewSpec.mode === 'blocks' ? m.reviewSpec.blockIds[0] : m.blocks[0].id),
+                  )
+                  .content.slice(0, 12),
+        },
+      ],
+    }));
+    if (scopeFault === 'missing') review.assessments = [];
+    if (scopeFault === 'outside' || scopeFault === 'finding') {
+      const criterion = review.assessments![scopeFault === 'finding' ? 1 : 0];
+      criterion.verdict = 'needs_revision';
+      const block =
+        scopeFault === 'outside'
+          ? m.blocks.find((b: { id: string }) => !m.reviewSpec.blockIds.includes(b.id))
+          : m.blocks.find((b: { id: string }) => b.id === m.reviewSpec.blockIds[0]);
+      review.findings = [
+        {
+          ...seed().tasks[0].findings[0],
+          criterionId: criterion.criterionId,
+          title: '越界修改',
+          kind: 'test',
+          severity: 'low',
+          blockId: block.id,
+          before: block.content.slice(0, 12),
+          after: 'after',
+          reason: 'test',
+          sourceId: '',
+          quote: '',
+          relation: 'insufficient',
+        },
+      ];
+    }
+  }
   await new Promise((r) => setTimeout(r, delay));
   res.writeHead(200, { 'Content-Type': 'application/json', 'x-request-id': 'mock-local-request' });
   res.end(
@@ -91,6 +140,102 @@ test('runner integration', async (t) => {
   });
   readStore();
   configure();
+  await t.test('定向三种策略完整携带范围，复查单项保留其他结论；越界与缺项失败', async () => {
+    const { defaultReviewSpec, assessmentRows } = await import('../lib/review-scope');
+    const task = fresh(),
+      spec = defaultReviewSpec();
+    spec.mode = 'blocks';
+    spec.blockIds = [task.revisions[0].blocks[0].id];
+    spec.criteria.push({ id: 'budget', title: '预算', standard: '各项费用合计正确' });
+    const options = {
+      strategy: 'S0' as const,
+      contextMode: 'continue' as const,
+      selfCheck: false,
+      mode: 'live' as const,
+      slot: 'a' as const,
+      budget: null,
+      reviewSpec: spec,
+    };
+    for (const strategy of ['S0', 'S1', 'S5'] as const) {
+      requests.length = 0;
+      const id = randomUUID();
+      startRun(task.id, { ...options, strategy }, id);
+      const run = await finished(task.id, id);
+      assert.equal(run.state, 'succeeded', JSON.stringify(run.steps));
+      assert.equal(run.assessments!.length, 2);
+      assert.equal(run.assessments![1].verdict, 'needs_revision');
+      assert.ok(requests.every((r) => JSON.stringify(r.reviewSpec) === JSON.stringify(spec)));
+      assert.ok(
+        requests.every((r) => (r.blocks as unknown[]).length === task.revisions[0].blocks.length),
+      );
+    }
+    const id = randomUUID();
+    startRun(task.id, { ...options, reviewSpec: { ...spec, criteria: [spec.criteria[1]] } }, id);
+    assert.equal((await finished(task.id, id)).assessments![0].verdict, 'passed');
+    assert.equal(assessmentRows(getTask(task.id)).length, 2);
+    assert.ok(assessmentRows(getTask(task.id)).every((r) => r.assessment.verdict === 'passed'));
+    scopeFault = 'finding';
+    try {
+      const findingId = randomUUID();
+      startRun(task.id, options, findingId);
+      assert.equal((await finished(task.id, findingId)).state, 'succeeded');
+      assert.equal(getTask(task.id).findings.filter((f) => !f.stale).length, 1);
+    } finally {
+      scopeFault = 'none';
+    }
+    const recheckId = randomUUID();
+    startRun(
+      task.id,
+      { ...options, reviewSpec: { ...spec, criteria: [spec.criteria[1]] } },
+      recheckId,
+    );
+    assert.equal((await finished(task.id, recheckId)).state, 'succeeded');
+    assert.equal(getTask(task.id).findings.filter((f) => !f.stale).length, 0);
+    assert.equal(getTask(task.id).findings[0].supersededBy, recheckId);
+    for (const fault of ['outside', 'missing'] as const) {
+      scopeFault = fault;
+      try {
+        const badId = randomUUID();
+        startRun(task.id, options, badId);
+        const bad = await finished(task.id, badId);
+        assert.equal(bad.state, 'failed');
+        assert.equal(bad.assessments, undefined);
+        assert.equal(bad.steps[0].sent, true);
+        assert.equal(assessmentRows(getTask(task.id)).length, 2);
+      } finally {
+        scopeFault = 'none';
+      }
+    }
+    scopeFault = 'fake';
+    try {
+      const fakeId = randomUUID();
+      startRun(task.id, options, fakeId);
+      assert.ok(
+        (await finished(task.id, fakeId)).assessments!.every((a) => a.verdict === 'insufficient'),
+      );
+    } finally {
+      scopeFault = 'none';
+    }
+    const count = requests.length;
+    assert.throws(
+      () => startRun(task.id, { ...options, baseRevision: 'stale' }, randomUUID()),
+      /更新/,
+    );
+    assert.throws(
+      () => startRun(task.id, { ...options, contextMode: 'source_only' }, randomUUID()),
+      /定向审查/,
+    );
+    assert.throws(
+      () =>
+        startRun(
+          task.id,
+          { ...options, reviewSpec: { ...spec, blockIds: ['deleted'] } },
+          randomUUID(),
+        ),
+      /删除/,
+    );
+    assert.equal(requests.length, count);
+  });
   await t.test('S1 实际请求隔离，比较阶段显式读取两候选；同幂等键不重复调用', async () => {
     requests.length = 0;
     const task = fresh(),
@@ -105,6 +250,8 @@ test('runner integration', async (t) => {
     };
     startRun(task.id, opts, id);
     startRun(task.id, opts, id);
+    assert.throws(() => startRun(task.id, { ...opts, budget: 1 }, id), /请求标识/);
+    assert.throws(() => startRun(task.id, opts, id, '换个问题'), /请求标识/);
     const r = await finished(task.id, id);
     assert.equal(r.state, 'succeeded');
     assert.equal(requests.length, 3);

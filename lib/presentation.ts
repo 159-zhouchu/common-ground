@@ -40,6 +40,7 @@ export function recommendation(task: Pick<Task, 'sources'>, connections: PublicC
       };
 }
 export function staleReason(task: Task, f: Finding) {
+  if (f.supersededBy) return '该项已完成新一轮审查，此建议保留为历史记录；请查看最新分项结论。';
   const revision = task.revisions.find((r) => r.id === task.currentRevision);
   const old = task.revisions.find((r) => r.id === f.baseRevision);
   const source = task.sources.find((s) => s.id === f.sourceId);
@@ -69,7 +70,10 @@ export function filteredFindings(
       (f) =>
         filter === 'all' ||
         (filter === 'pending' && !f.stale && (f.status === 'pending' || f.status === 'deferred')) ||
-        (filter === 'stale' && f.stale && (f.status === 'pending' || f.status === 'deferred')) ||
+        (filter === 'stale' &&
+          f.stale &&
+          !f.supersededBy &&
+          (f.status === 'pending' || f.status === 'deferred')) ||
         (filter === 'resolved' && (f.status === 'accepted' || f.status === 'rejected')),
     )
     .slice()
@@ -114,6 +118,12 @@ export function runFeedback(run: Run, findings: Finding[]) {
       tone: 'warning',
       title: '检查已中断',
       detail: '服务曾重启。请查看已完成步骤，再决定是否重新检查。',
+    };
+  if (run.reviewSpec && run.assessments)
+    return {
+      tone: 'neutral',
+      title: '本次分项审查完成',
+      detail: `${run.assessments.filter((a) => a.verdict === 'passed').length} 项通过，${run.assessments.filter((a) => a.verdict === 'needs_revision').length} 项需修改，${run.assessments.filter((a) => a.verdict === 'insufficient').length} 项证据不足；结论仅针对本次标准与版本。${run.mode === 'demo' ? '合成示例不判断自定义验收标准。' : ''}`,
     };
   return discovered
     ? {

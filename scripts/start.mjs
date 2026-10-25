@@ -19,7 +19,7 @@ const port = Number(process.env.CG_PORT || 3210),
   url = `http://127.0.0.1:${port}`,
   dir = path.resolve(process.env.CG_DATA_DIR || '.data');
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('CG_PORT 无效');
-fs.mkdirSync(dir, { recursive: true });
+fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 const lockFile = path.join(dir, 'launcher.lock');
 async function main() {
   const releaseLock = acquireLauncherLock(lockFile);

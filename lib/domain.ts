@@ -1,9 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Task, Block, Manifest, RunOptions, Step, Finding, Review, Impact } from './types';
+import type {
+  Task,
+  Block,
+  Manifest,
+  RunOptions,
+  Step,
+  Finding,
+  Review,
+  Impact,
+  ReviewSpec,
+} from './types';
 import { now } from './seed';
 import { MAX_BLOCK_CHARACTERS, MAX_DOCUMENT_CHARACTERS } from './limits';
 import { manifestContent, documentSteps } from './document-input';
 import { findingStateNames, exportDate } from './text';
+import { assessmentRows, scopeNames, verdictNames } from './review-scope';
 export const uid = () => randomUUID();
 export class AppError extends Error {
   constructor(
@@ -26,8 +37,13 @@ export function requireIdle(task: Task) {
 export function plan(opts: RunOptions): Step[] {
   return documentSteps(opts).map((step) => ({ ...step, id: uid(), status: 'queued', cost: null }));
 }
-export function manifest(task: Task, mode: 'continue' | 'source_only', draft?: Block[]): Manifest {
-  const raw = manifestContent(task, current(task), mode, draft);
+export function manifest(
+  task: Task,
+  mode: 'continue' | 'source_only',
+  draft?: Block[],
+  reviewSpec?: ReviewSpec,
+): Manifest {
+  const raw = manifestContent(task, current(task), mode, draft, reviewSpec);
   return { ...raw, hash: createHash('sha256').update(JSON.stringify(raw)).digest('hex') };
 }
 export function appendRevision(
@@ -185,12 +201,20 @@ export function markdown(task: Task, review = false) {
     ' · ' +
     exportDate(r.createdAt) +
     (task.example ? ' · 合成示例' : '') +
-    '\n\n## 任务约束\n\n' +
-    r.constraint +
+    (r.constraint.trim() ? '\n\n## 任务约束\n\n' + r.constraint : '') +
     '\n\n' +
-    r.blocks.map((b) => '## ' + (b.title || '段落') + '\n\n' + b.content).join('\n\n') +
+    r.blocks
+      .map((b, i) => '## ' + (b.title || `第 ${i + 1} 段`) + '\n\n' + b.content)
+      .join('\n\n') +
     (review
-      ? '\n\n---\n\n## 问题与依据记录\n\n处理状态截至导出时，正文绑定上述版本。\n\n' +
+      ? '\n\n---\n\n## 分项审查记录\n\n通过仅针对所列标准与当时版本。\n\n' +
+        assessmentRows(task)
+          .map(
+            ({ run, criterion, assessment, staleReason }) =>
+              `### ${criterion.title}\n\n范围：${scopeNames[run.reviewSpec!.mode]}${run.reviewSpec!.focus ? ' · ' + run.reviewSpec!.focus : ''}\n\n验收标准：${criterion.standard}\n\n结论：${verdictNames[assessment.verdict]}${staleReason ? '（待复核）' : ''}${run.mode === 'demo' ? ' · 合成示例' : ''}\n\n版本：v${task.revisions.find((v) => v.id === run.baseRevision)?.number ?? '?'}\n\n${assessment.reason}\n\n${staleReason}\n\n${assessment.evidence.map((e) => `依据（${e.blockId || e.sourceId}）：${e.quote}`).join('\n\n')}`,
+          )
+          .join('\n\n') +
+        '\n\n## 问题与依据记录\n\n处理状态截至导出时，正文绑定上述版本。\n\n' +
         task.findings
           .map(
             (f) =>
@@ -198,7 +222,7 @@ export function markdown(task: Task, review = false) {
               f.title +
               '\n\n状态：' +
               findingStateNames[f.status] +
-              (f.stale ? '（需重审）' : '') +
+              (f.supersededBy ? '（已由新审查替代）' : f.stale ? '（需重审）' : '') +
               '\n\n' +
               f.reason +
               '\n\n原文：' +

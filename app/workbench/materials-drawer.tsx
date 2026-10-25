@@ -65,7 +65,8 @@ export function MaterialsDrawer({
           <>
             <p>
               参考材料用于检查方案中的具体主张。支持 TXT、Markdown、DOCX，每份不超过 5
-              MB，提取后的文本不超过 50,000 字符。
+              MiB，提取后的文本不超过 50,000 字符。DOCX 还需满足解压总量不超过 20 MiB（含图片）、
+              最多 1000 个条目及 8 秒解析时限；复杂文件即使小于 5 MiB 也可能无法导入。
             </p>
             <button
               className="cg-primary"
