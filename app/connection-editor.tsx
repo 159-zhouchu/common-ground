@@ -206,13 +206,14 @@ export default function ConnectionEditor({
     }
   }
   const editingExisting = items.some((c) => c.connectionId === draft?.connectionId);
+  const Heading = embedded ? 'h2' : 'h1';
   return (
     <div className={'api-editor ' + (embedded ? 'embedded' : 'standalone')}>
       <div className="api-page-heading">
         <div>
-          <h1>
+          <Heading>
             {draft ? (editingExisting ? '编辑连接' : '新增连接') : '让合适的模型，加入协作。'}
-          </h1>
+          </Heading>
           <p>保存最多 {MAX_CONNECTIONS} 套 API 配置，供文稿检查和 AI 协作按角色选择。</p>
         </div>
         {!embedded && (

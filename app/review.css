@@ -1,0 +1,306 @@
+.cg-review-controls {
+  margin: 0 auto;
+  max-width: 1378px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  background: var(--surface);
+}
+.cg-review-controls > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  cursor: pointer;
+}
+.cg-review-controls > summary > span {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.cg-review-controls > summary > span > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.cg-review-controls[open] > summary > svg {
+  transform: rotate(180deg);
+}
+.cg-review-controls fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0 0 16px;
+  min-width: 0;
+}
+.cg-review-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin: 0 0 14px;
+}
+.cg-review-modes label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.cg-review-modes label + label {
+  border-left: 0;
+}
+.cg-review-modes label.chosen {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.cg-review-blocks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 0 0 16px;
+}
+.cg-review-blocks label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.cg-review-focus,
+.cg-review-criterion > label:not(.cg-review-select) {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.cg-review-controls input:not([type='checkbox']):not([type='radio']),
+.cg-review-controls textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.cg-review-criteria-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0;
+}
+.cg-review-criteria-heading h2 {
+  font-size: 14px;
+}
+.cg-review-criteria {
+  display: grid;
+  gap: 12px;
+}
+.cg-review-criterion {
+  display: grid;
+  grid-template-columns: 64px minmax(130px, 1fr) minmax(180px, 2.4fr) 44px;
+  align-items: start;
+  gap: 12px;
+}
+.cg-review-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 66px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.cg-review-criterion > .cg-icon {
+  margin-top: 18px;
+}
+.cg-review-error,
+.cg-review-controls .cg-review-error-collapsed {
+  color: var(--warning-ink);
+  font-size: 13px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.cg-review-controls[open] .cg-review-error-collapsed {
+  display: none;
+}
+.cg-review-note {
+  font-size: 13px;
+  color: var(--muted);
+}
+.cg-assessments {
+  margin: 0 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+.cg-assessments > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+}
+.cg-assessments h3 {
+  font-size: 16px;
+}
+.cg-assessments > header > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.cg-assessment-history > summary {
+  padding: 12px 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+.cg-review-controls input[type='checkbox'],
+.cg-review-controls input[type='radio'] {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.cg-review-blocks label {
+  align-items: center;
+  min-height: 40px;
+}
+.cg-overview h1 {
+  text-wrap: balance;
+}
+.api-editor.embedded .api-page-heading h2 {
+  font-size: 28px;
+  font-weight: 730;
+  line-height: 1.4;
+}
+.cg-paper > .cg-paper-title {
+  max-width: 44rem;
+  margin: 0 auto 13px;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.65;
+}
+.cg-paper-title .cg-tag {
+  margin-left: 10px;
+  font-weight: 400;
+}
+.site-local-short {
+  display: none;
+}
+.cg-version-link {
+  min-width: 44px;
+  min-height: 40px;
+}
+@media (max-width: 700px) {
+  .cg-overview h1 {
+    display: block;
+    font-size: 21px;
+  }
+  .cg-overview .cg-project-type {
+    display: table;
+    margin-top: 8px;
+  }
+  .site-header .site-local {
+    font-size: 11px;
+    gap: 6px;
+  }
+  .site-local-full {
+    display: none;
+  }
+  .site-local-short {
+    display: inline;
+  }
+  .cg-header .cg-nav-button,
+  .cg-more > summary {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .cg-paper > .cg-paper-title {
+    font-size: 22px;
+  }
+  .cg-paper-title .cg-tag {
+    display: table;
+    margin: 5px 0 0;
+  }
+}
+.cg-assessment {
+  padding: 15px 0;
+  border-top: 1px solid var(--border);
+}
+.cg-assessment-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.cg-assessment h4 {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.cg-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: normal;
+}
+.cg-verdict.passed {
+  color: var(--green-dark);
+}
+.cg-verdict.needs_revision {
+  color: var(--error-ink);
+}
+.cg-verdict.insufficient,
+.cg-verdict.stale {
+  color: var(--warning-ink);
+}
+.cg-assessment p {
+  margin: 8px 0;
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cg-assessment details {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.cg-assessment blockquote {
+  margin: 10px 0;
+  border-left: 2px solid var(--border-strong);
+  padding-left: 10px;
+}
+.cg-assessment blockquote p {
+  color: var(--muted);
+}
+@media (max-width: 600px) {
+  .cg-review-controls {
+    padding: 0 16px;
+  }
+  .cg-review-criterion {
+    grid-template-columns: 52px minmax(0, 1fr) 36px;
+    gap: 8px;
+  }
+  .cg-review-criterion > label:nth-of-type(3) {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  .cg-review-criterion > .cg-icon {
+    grid-column: 3;
+    grid-row: 1;
+    margin-top: 18px;
+  }
+  .cg-review-criteria-heading {
+    flex-wrap: wrap;
+  }
+  .cg-review-modes label {
+    padding: 8px 10px;
+  }
+}

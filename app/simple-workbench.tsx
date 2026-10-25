@@ -29,7 +29,7 @@ import {
   Layers,
   ArrowUpRight,
 } from 'lucide-react';
-import type { Task, Block, Finding, PublicConnection } from '@/lib/types';
+import type { Task, Block, Finding, PublicConnection, ReviewSpec } from '@/lib/types';
 import {
   checkMethods,
   callCount,
@@ -49,6 +49,14 @@ import { Sheet, Highlight, JsonBlock, Diff } from './workbench/shared';
 import { MaterialsDrawer } from './workbench/materials-drawer';
 import { VersionsDrawer } from './workbench/versions-drawer';
 import { DiscussionDrawer } from './workbench/discussion-drawer';
+import { ReviewControls, AssessmentPanel } from './workbench/review-controls';
+import {
+  defaultReviewSpec,
+  ReviewSpecSchema,
+  reviewSpecError,
+  prepareCriterionReview,
+  reconcileReviewBlocks,
+} from '@/lib/review-scope';
 import { MAX_BLOCK_CHARACTERS, MAX_DOCUMENT_CHARACTERS } from '@/lib/limits';
 
 type Workspace = {
@@ -134,6 +142,16 @@ export default function SimpleWorkbench() {
     [includeReview, setIncludeReview] = useState(true);
   const [renameId, setRenameId] = useState(''),
     [renameTitle, setRenameTitle] = useState('');
+  const [reviewConfig, setReviewConfig] = useState<ReviewSpec>(defaultReviewSpec),
+    [reviewSelection, setReviewSelection] = useState<string[]>(['overall']);
+  const scopedReview = method === 'S5' || context === 'continue';
+  const reviewSpec = useMemo(
+    () => ({
+      ...reviewConfig,
+      criteria: reviewConfig.criteria.filter((c) => reviewSelection.includes(c.id)),
+    }),
+    [reviewConfig, reviewSelection],
+  );
   const submission = useRef<{ signature: string; id: string } | null>(null),
     discussionSubmission = useRef<{ signature: string; id: string } | null>(null);
   const [pendingDiscussion, setPendingDiscussion] = useState<{
@@ -186,6 +204,7 @@ export default function SimpleWorkbench() {
     if (!['versions', 'activity'].includes(drawer || '')) setDetailTask(null);
   }, [drawer]);
   const revision = task?.revisions.find((r) => r.id === task.currentRevision);
+  const reviewError = task && scopedReview ? reviewSpecError(reviewSpec, task) : '';
   const active = task?.runs.find((r) => r.state === 'running'),
     latest = task?.runs.at(-1);
   const finding = task?.findings.find((f) => f.id === selected),
@@ -202,8 +221,9 @@ export default function SimpleWorkbench() {
     task?.findings.filter((f) => !f.stale && (f.status === 'pending' || f.status === 'deferred'))
       .length ?? 0;
   const staleCount =
-    task?.findings.filter((f) => f.stale && (f.status === 'pending' || f.status === 'deferred'))
-      .length ?? 0;
+    task?.findings.filter(
+      (f) => f.stale && !f.supersededBy && (f.status === 'pending' || f.status === 'deferred'),
+    ).length ?? 0;
   const completedCalls =
     task?.runs
       .filter((r) => r.mode === 'live')
@@ -296,6 +316,18 @@ export default function SimpleWorkbench() {
     setSecondary(selection?.b || '');
     setCompareRole(selection?.compareRole === 'b' ? 'b' : 'a');
     setReceiver(selection?.receiver || '');
+    let savedReview;
+    try {
+      savedReview = ReviewSpecSchema.safeParse(
+        JSON.parse(readLocal('cg-review-' + task.id) || 'null'),
+      );
+    } catch {}
+    const spec = reconcileReviewBlocks(
+      savedReview?.success ? savedReview.data : defaultReviewSpec(),
+      task.revisions.find((r) => r.id === task.currentRevision)!.blocks,
+    );
+    setReviewConfig(spec);
+    setReviewSelection(spec.criteria.map((c) => c.id));
     selectionTask.current = task.id;
     setSelected(null);
     setFilter('pending');
@@ -316,6 +348,18 @@ export default function SimpleWorkbench() {
       localStorage.setItem('cg-task', task.id);
     } catch {}
   }, [task]);
+  useEffect(() => {
+    if (!task || !revision || selectionTask.current !== task.id) return;
+    setReviewConfig((previous) => {
+      const next = reconcileReviewBlocks(previous, revision.blocks);
+      if (next !== previous) {
+        try {
+          localStorage.setItem('cg-review-' + task.id, JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+  }, [task?.id, revision?.id]);
   function persistDraft() {
     if (!editing || !dirty || !task || draftTask !== task.id) return true;
     try {
@@ -544,6 +588,10 @@ export default function SimpleWorkbench() {
       setError('请先保存正文草稿，再开始检查。');
       return;
     }
+    if (reviewError) {
+      setError(reviewError);
+      return;
+    }
     const runMode = task.example ? (modeTask === task.id ? mode : 'demo') : 'live';
     if (runMode === 'live' && missing) {
       setError('请为本次任务选择已启用、已配置的连接；原连接停用或删除后须重新选择。');
@@ -562,6 +610,7 @@ export default function SimpleWorkbench() {
         : {}),
       compareRole,
       budget: budget ? Number(budget) : null,
+      ...(scopedReview ? { reviewSpec } : {}),
     };
     const signature = JSON.stringify(payload);
     if (submission.current?.signature !== signature)
@@ -680,6 +729,15 @@ export default function SimpleWorkbench() {
     setNotice('已请求导出当前保存版本。');
     setDrawer(null);
   }
+  function changeReviewConfig(spec: ReviewSpec) {
+    setReviewConfig(spec);
+    if (!task) return;
+    try {
+      localStorage.setItem('cg-review-' + task.id, JSON.stringify(spec));
+    } catch {
+      setError('审查设置暂存失败，请保持页面打开。');
+    }
+  }
   function switchMobile(next: 'document' | 'suggestions') {
     positions.current[mobile] = window.scrollY;
     setMobile(next);
@@ -765,9 +823,10 @@ export default function SimpleWorkbench() {
             mode: 'live',
             slot: 'a',
             budget: null,
+            ...(scopedReview ? { reviewSpec } : {}),
           })
         : null,
-    [task, revision, context, method, selfCheck],
+    [task, revision, context, method, selfCheck, scopedReview, reviewSpec],
   );
   const inputBytes = inputBudget?.bytes ?? 0,
     inputLimit = inputBudget?.limit ?? 100000;
@@ -780,6 +839,7 @@ export default function SimpleWorkbench() {
     busy ||
     !!active ||
     !!dirty ||
+    !!reviewError ||
     (runMode === 'live' && (missing || needsMaterials || inputTooLarge));
   const titles: Record<NonNullable<Drawer>, string> = {
     projects: '项目管理与回收站',
@@ -796,11 +856,8 @@ export default function SimpleWorkbench() {
   };
 
   return (
-    <div className="cg-app" ref={appRoot}>
-      <a className="cg-skip" href="#current-document">
-        跳到当前方案
-      </a>
-      <header className="cg-header">
+    <div className="cg-app" ref={appRoot} role="region" aria-label="文稿工作空间">
+      <div className="cg-header" role="region" aria-label="项目工具栏">
         <span className="cg-breadcrumb">
           文稿项目 <span>/</span>
         </span>
@@ -831,7 +888,7 @@ export default function SimpleWorkbench() {
             </button>
           </div>
         </details>
-        <nav>
+        <nav aria-label="文档操作">
           <span className="cg-local-status">
             <span className={offline ? 'is-offline' : ''} />
             {offline ? '连接中断' : '本机已连接'}
@@ -848,14 +905,14 @@ export default function SimpleWorkbench() {
           >
             <BookOpen size={16} />
             <span>材料</span>
-            {!!task?.sources.length && <small>{task.sources.length}</small>}
+            {!showWelcome && !!task?.sources.length && <small>{task.sources.length}</small>}
           </button>
           <button
             className="cg-nav-button"
             aria-label="版本"
             title="版本"
             onClick={() => open('versions')}
-            disabled={!task}
+            disabled={!task || !!showWelcome}
           >
             <History size={16} />
             <span>版本</span>
@@ -865,7 +922,7 @@ export default function SimpleWorkbench() {
             aria-label="讨论"
             title="讨论"
             onClick={() => open('discussion')}
-            disabled={!task}
+            disabled={!task || !!showWelcome}
           >
             <MessageSquare size={16} />
             <span>讨论</span>
@@ -890,7 +947,9 @@ export default function SimpleWorkbench() {
                 <button
                   key={key}
                   onClick={() => open(key)}
-                  disabled={!task && !['projects', 'settings', 'help'].includes(key)}
+                  disabled={
+                    (!task || !!showWelcome) && !['projects', 'settings', 'help'].includes(key)
+                  }
                 >
                   <Icon size={16} />
                   {name}
@@ -899,14 +958,14 @@ export default function SimpleWorkbench() {
             </div>
           </details>
         </nav>
-      </header>
+      </div>
       {!workspace ? (
-        <main className="cg-loading">
+        <main className="cg-loading" id="main-content" tabIndex={-1}>
           <Loader2 className="spin" />
           正在打开共桌{error && <button onClick={load}>重新连接</button>}
         </main>
       ) : showWelcome ? (
-        <main className="cg-welcome">
+        <main className="cg-welcome" id="main-content" tabIndex={-1}>
           <div className="cg-empty-heading">
             <span className="cg-eyebrow">WORKSPACE</span>
             <h1>项目工作台</h1>
@@ -955,7 +1014,7 @@ export default function SimpleWorkbench() {
               </ol>
               <button className="cg-secondary" onClick={sampleFlow}>
                 <Play size={15} />
-                先体验完整示例
+                打开示例项目
               </button>
               <small>合成预置问题 · 无需 Key · 不调用模型</small>
             </section>
@@ -970,7 +1029,7 @@ export default function SimpleWorkbench() {
                 <div>
                   <span className="cg-eyebrow">DOCUMENT WORKSPACE</span>
                   <h1>
-                    {task.title}
+                    <span className="cg-project-title">{task.title}</span>
                     <span className="cg-project-type">
                       {task.example ? '合成示例' : '个人项目'}
                     </span>
@@ -1415,7 +1474,16 @@ export default function SimpleWorkbench() {
                 建议 <span>{pending}</span>
               </button>
             </div>
-            <main className="cg-main" data-mobile={mobile}>
+            <ReviewControls
+              task={task}
+              spec={reviewConfig}
+              selectedIds={reviewSelection}
+              disabled={!!active || busy}
+              enabled={scopedReview}
+              onChange={changeReviewConfig}
+              onSelect={setReviewSelection}
+            />
+            <main className="cg-main" id="main-content" tabIndex={-1} data-mobile={mobile}>
               <section
                 className="cg-document"
                 id="current-document"
@@ -1495,10 +1563,10 @@ export default function SimpleWorkbench() {
                       当前草稿基于旧版本；保存会进行版本检查。请保留重要内容，不会自动覆盖新方案。
                     </div>
                   )}
-                  <h1>
+                  <h2 className="cg-paper-title">
                     {task.title}
                     {task.example && <span className="cg-tag">合成示例</span>}
-                  </h1>
+                  </h2>
                   {task.goal && <p className="cg-goal">{task.goal}</p>}
                   <section className="cg-constraints">
                     <b>目标与约束</b>
@@ -1547,6 +1615,34 @@ export default function SimpleWorkbench() {
                           ) : null}
                           {!editing && b.origin === 'ai' && (
                             <span className="cg-tag">已采纳修订</span>
+                          )}
+                          {!editing && (
+                            <button
+                              className="cg-text-button"
+                              title="将此段设为审查范围"
+                              disabled={!!active || busy}
+                              onClick={() => {
+                                changeReviewConfig({
+                                  ...reviewConfig,
+                                  mode: 'blocks',
+                                  blockIds: [b.id],
+                                  focus: '',
+                                });
+                                if (!reviewSelection.length)
+                                  setReviewSelection(reviewConfig.criteria.map((c) => c.id));
+                                setContext('continue');
+                                const controls = document.getElementById(
+                                  'review-controls',
+                                ) as HTMLDetailsElement;
+                                if (controls) {
+                                  controls.open = true;
+                                  controls.scrollIntoView({ block: 'center', behavior: 'instant' });
+                                }
+                              }}
+                            >
+                              <Search size={14} />
+                              审查此段
+                            </button>
                           )}
                           {!editing && !!related.length && (
                             <button
@@ -1692,6 +1788,43 @@ export default function SimpleWorkbench() {
                   </select>
                 </header>
                 <div className="cg-results-scroll">
+                  <AssessmentPanel
+                    task={task}
+                    mode={runMode}
+                    spec={reviewSpec}
+                    disabled={!!active || busy || dirty}
+                    onPrepare={(spec) => {
+                      const prepared = prepareCriterionReview(reviewConfig, spec);
+                      if (!prepared) {
+                        setError('已配置 6 个验收项，请先移除一个再载入此项；现有设置已保留。');
+                        return;
+                      }
+                      changeReviewConfig(prepared);
+                      setReviewSelection(spec.criteria.map((c) => c.id));
+                      setContext('continue');
+                      setNotice('已载入该项的范围与标准；确认连接后点击“开始检查”。');
+                      const controls = document.getElementById(
+                        'review-controls',
+                      ) as HTMLDetailsElement;
+                      if (controls) {
+                        controls.open = true;
+                        controls.scrollIntoView({ block: 'center', behavior: 'instant' });
+                      }
+                    }}
+                    onEvidence={(blockId, sourceId) => {
+                      if (sourceId) {
+                        setSourceId(sourceId);
+                        open('materials');
+                      } else {
+                        setMobile('document');
+                        requestAnimationFrame(() =>
+                          document
+                            .getElementById('block-' + blockId)
+                            ?.scrollIntoView({ block: 'center', behavior: 'instant' }),
+                        );
+                      }
+                    }}
+                  />
                   {latest &&
                     latest.state !== 'running' &&
                     (() => {
@@ -1782,7 +1915,13 @@ export default function SimpleWorkbench() {
                             </span>
                             <span className="cg-finding-reason">{firstSentence(f.reason)}</span>
                             {(f.stale || f.status !== 'pending') && (
-                              <small>{f.stale ? '已过期 · 需重查' : stateNames[f.status]}</small>
+                              <small>
+                                {f.supersededBy
+                                  ? '已由新审查替代'
+                                  : f.stale
+                                    ? '已过期 · 需重查'
+                                    : stateNames[f.status]}
+                              </small>
                             )}
                             <ChevronDown size={16} />
                           </button>

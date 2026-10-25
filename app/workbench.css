@@ -61,8 +61,8 @@
 .cg-document-toolbar small{font-weight:400;margin-left:9px}
 .cg-document-toolbar>div{display:flex;align-items:center;gap:5px}
 .cg-paper{border:1px solid var(--border);border-radius:var(--radius);padding:30px clamp(22px,2.5vw,36px) 40px;background:var(--surface);box-shadow:none;min-height:570px}
-.cg-paper h1{font-size:var(--text-title);line-height:1.65;font-weight:650;margin:0 0 13px}
-.cg-paper h1 .cg-tag{margin-left:10px;font-weight:400}
+
+
 .cg-goal{font-size:var(--text-base);color:var(--muted);margin-bottom:25px!important}
 .cg-constraints{padding:15px 18px;background:var(--surface-subtle);border-left:3px solid var(--border-strong);border-radius:var(--radius-sm);margin:24px 0 30px;font-size:var(--text-base)}
 .cg-constraints b{font-size:var(--text-sm)}
@@ -186,7 +186,6 @@
 .cg-result-actions{flex-shrink:0;border-top:1px solid var(--border);padding:12px 16px;background:var(--surface)}
 .cg-result-actions>small{display:block;margin-bottom:7px;font-weight:600}.cg-result-actions>p{font-size:12px;color:var(--warning-ink);margin-bottom:8px}
 .cg-finding-summary:focus-visible{outline-offset:-3px}
-.cg-connection-choice{color:var(--accent);text-decoration:underline;min-height:28px;padding:0 4px;text-align:left}
 .cg-paper>h1,.cg-paper>.cg-goal,.cg-paper>.cg-constraints,.cg-paper>.cg-block{max-width:44rem;margin-left:auto;margin-right:auto}
 .cg-block,.cg-paper mark{scroll-margin-top:calc(var(--sticky-header) + var(--bar-height) + 32px)}
 .cg-version-link{color:var(--accent);text-decoration:underline;min-height:36px;padding:0 3px}
@@ -221,7 +220,7 @@
 .cg-method-menu{position:absolute;top:calc(100% + 4px);left:0;max-height:calc(100dvh - var(--bar-height) - 28px);width:calc(100vw - 28px)}
 .cg-export{padding:10px;min-height:44px}.cg-input-summary{line-height:1.8}
 .cg-document-toolbar small{font-size:var(--text-xs);display:block;margin-left:0}.cg-document-toolbar .cg-primary{font-size:var(--text-xs);padding:7px 10px}
-.cg-paper{padding:25px 21px}.cg-paper h1{font-size:22px}.cg-paper h1 .cg-tag{margin-left:0;margin-top:5px;display:table}
+.cg-paper{padding:25px 21px}
 .cg-constraints{padding:12px 14px;font-size:var(--text-sm)}
 .cg-sheet>header{height:58px;padding:0 18px}.cg-sheet-content{height:calc(100dvh - 58px);padding:20px 19px}
 .cg-form-row{flex-wrap:wrap}.cg-welcome{padding:6vh 14px}.cg-welcome-paper{padding:40px 22px}.cg-welcome h1{font-size:23px}.cg-welcome-paper>div{flex-direction:column}
