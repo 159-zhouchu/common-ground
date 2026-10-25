@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 
 export function localBase(value = process.env.CG_BASE_URL || 'http://127.0.0.1:3210') {
@@ -71,21 +72,92 @@ export function brief(job) {
   if (job.error) lines.push('错误：' + job.error);
   return lines.filter(Boolean).join('\n\n') + '\n';
 }
-// Only explicitly listed UTF-8 files are read; no directory scanning or shell execution.
-export async function loadRequest(file) {
+function sensitivePath(relative) {
+  return relative
+    .split(/[\\/]/)
+    .some((part) =>
+      /^(?:\.env.*|\.data|\.git|\.gitconfig|\.codex|\.ssh|\.aws|\.npmrc|node_modules|workspace\.json|credentials?\.json|connections(?:-v1)?\.json|id_(?:rsa|dsa|ed25519)(?:\.pub)?|.*\.(?:pem|key|crt|p12|pfx))$/i.test(
+        part,
+      ),
+    );
+}
+export async function requestRoot(file) {
   const absolute = path.resolve(file);
-  const data = JSON.parse(await fs.readFile(absolute, 'utf8'));
+  if (sensitivePath(path.basename(absolute))) throw new Error('请求文件不能使用敏感文件名。');
+  const root = await fs.realpath(path.dirname(absolute));
+  const real = await fs.realpath(absolute);
+  if (path.dirname(real) !== root) throw new Error('请求文件不能通过符号链接越出所在目录。');
+  return { root, absolute: real };
+}
+export async function scopedFile(root, name, output = false) {
+  if (typeof name !== 'string' || !name || name.includes('\0')) throw new Error('文件路径无效。');
+  const resolved = path.resolve(root, name);
+  const relative = path.relative(root, resolved);
+  if (
+    !relative ||
+    relative === '..' ||
+    relative.startsWith('..' + path.sep) ||
+    path.isAbsolute(relative) ||
+    sensitivePath(relative)
+  )
+    throw new Error('文件必须位于请求文件所在目录内，且不能是密钥或本机私有配置。');
+  const real = output
+    ? path.join(await fs.realpath(path.dirname(resolved)), path.basename(resolved))
+    : await fs.realpath(resolved);
+  const realRelative = path.relative(root, real);
+  if (
+    realRelative === '..' ||
+    realRelative.startsWith('..' + path.sep) ||
+    path.isAbsolute(realRelative) ||
+    sensitivePath(realRelative)
+  )
+    throw new Error('文件符号链接越出目录或指向敏感配置。');
+  return real;
+}
+// The explicit request directory bounds file inclusion, not an untrusted agent's OS permissions.
+async function readScopedText(root, name) {
+  const resolved = await scopedFile(root, name);
+  const expected = await fs.lstat(resolved);
+  if (!expected.isFile() || expected.nlink !== 1 || expected.size > 100000)
+    throw new Error('仅允许小于 100 KB、无硬链接的普通 UTF-8 文本文件：' + name);
+  const file = await fs.open(
+    resolved,
+    constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0),
+  );
+  try {
+    const stat = await file.stat();
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.size > 100000 ||
+      stat.dev !== expected.dev ||
+      stat.ino !== expected.ino
+    )
+      throw new Error('仅允许小于 100 KB、无硬链接的普通 UTF-8 文本文件：' + name);
+    // Read through the same verified handle, with a bound even if it grows.
+    const buffer = Buffer.alloc(100001);
+    let size = 0;
+    while (size < buffer.length) {
+      const { bytesRead } = await file.read(buffer, size, buffer.length - size, null);
+      if (!bytesRead) break;
+      size += bytesRead;
+    }
+    if (size > 100000) throw new Error('文本文件超过 100 KB：' + name);
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, size));
+  } finally {
+    await file.close();
+  }
+}
+export async function loadRequest(file) {
+  const { root, absolute } = await requestRoot(file);
+  const data = JSON.parse(await readScopedText(root, path.basename(absolute)));
   const { files = [], ...input } = data;
   if (!Array.isArray(files) || files.length > 20)
     throw new Error('files 最多列 20 个 UTF-8 文本文件。');
   const context = [...(input.context || [])];
   for (const name of files) {
     if (typeof name !== 'string') throw new Error('files 项必须是文件路径。');
-    const resolved = path.resolve(path.dirname(absolute), name),
-      stat = await fs.stat(resolved);
-    if (!stat.isFile() || stat.size > 100000)
-      throw new Error('上下文必须是小于 100 KB 的文本文件：' + name);
-    const content = new TextDecoder('utf-8', { fatal: true }).decode(await fs.readFile(resolved));
+    const content = await readScopedText(root, name);
     context.push({ name, content });
   }
   return { ...input, context, idempotencyKey: input.idempotencyKey || randomUUID() };

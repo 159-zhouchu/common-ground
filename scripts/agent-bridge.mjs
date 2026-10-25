@@ -1,6 +1,14 @@
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { localBase, request, waitJob, loadRequest, brief } from './agent-client.mjs';
+import {
+  localBase,
+  request,
+  waitJob,
+  loadRequest,
+  brief,
+  requestRoot,
+  scopedFile,
+} from './agent-client.mjs';
 
 export async function main(args = process.argv.slice(2)) {
   const [command, value] = args,
@@ -31,8 +39,10 @@ export async function main(args = process.argv.slice(2)) {
     return;
   }
   const outputIndex = args.indexOf('--out'),
-    output = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
-  if (outputIndex >= 0 && !output) throw new Error('--out 需要文件路径。');
+    outputName = outputIndex >= 0 ? args[outputIndex + 1] : undefined;
+  if (outputIndex >= 0 && !outputName) throw new Error('--out 需要文件路径。');
+  const { root } = await requestRoot(value);
+  const output = outputName ? await scopedFile(root, outputName, true) : undefined;
   if (output) {
     try {
       await fs.access(output);
@@ -45,7 +55,7 @@ export async function main(args = process.argv.slice(2)) {
   console.error('协作 ID：' + job.id + '；本机模型调用最多 4 次。');
   const deadline = Date.now() + 270000;
   while (job.state === 'running' && Date.now() < deadline) job = await waitJob(job.id, 45000, base);
-  if (output) await fs.writeFile(output, brief(job), { encoding: 'utf8', flag: 'wx' });
+  if (output) await fs.writeFile(output, brief(job), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   console.log(JSON.stringify(job, null, 2));
   // A caller must not interpret partial/needs_input as an executable green light.
   if (job.decision !== 'ready') process.exitCode = 2;
