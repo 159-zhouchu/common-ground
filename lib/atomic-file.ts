@@ -3,10 +3,14 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 export function writeAtomic(target: string, data: unknown) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   const temp = target + '.' + process.pid + '.' + randomUUID() + '.tmp';
   try {
-    fs.writeFileSync(temp, JSON.stringify(data, null, 2), { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(temp, JSON.stringify(data, null, 2), {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
     for (let attempt = 0; ; attempt++) {
       try {
         fs.renameSync(temp, target);

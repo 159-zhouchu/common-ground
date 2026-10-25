@@ -124,8 +124,9 @@ export function connections(): Connection[] {
     updatedAt: null,
   }));
   const backup = path.join(root, 'backups', 'connections-v1.json');
-  fs.mkdirSync(path.dirname(backup), { recursive: true });
+  fs.mkdirSync(path.dirname(backup), { recursive: true, mode: 0o700 });
   if (!fs.existsSync(backup)) fs.copyFileSync(p, backup, fs.constants.COPYFILE_EXCL);
+  if (process.platform !== 'win32') fs.chmodSync(backup, 0o600);
   writeAtomic(p, { version: 2, connections: migrated });
   return migrated;
 }
