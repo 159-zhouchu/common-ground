@@ -26,6 +26,7 @@
     "next": "^16.0.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "yauzl": "3.4.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
