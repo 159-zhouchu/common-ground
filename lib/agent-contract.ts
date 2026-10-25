@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ConnectionSnapshot } from './types';
+import type { ConnectionSnapshot, Step } from './types';
 
 export const agentRoles = ['planner', 'analyst', 'reviewer', 'synthesizer'] as const;
 export type AgentRole = (typeof agentRoles)[number];
@@ -55,6 +55,7 @@ export const AgentAdviceSchema = z
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
 export type AgentAdvice = z.infer<typeof AgentAdviceSchema>;
 export type AgentStep = {
+  diagnostic?: Step['diagnostic'];
   role: AgentRole;
   connection: ConnectionSnapshot;
   state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';

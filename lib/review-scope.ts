@@ -165,7 +165,8 @@ export function scopedOutputError(spec: ReviewSpec, review: Review) {
 }
 
 export function supersedeScopedFindings(task: Task, run: Run) {
-  if (run.state !== 'succeeded' || !run.reviewSpec || run.mode !== 'live') return;
+  if (!['succeeded', 'partial'].includes(run.state) || !run.reviewSpec || run.mode !== 'live')
+    return;
   for (const finding of task.findings) {
     if (!finding.criterionId || !['pending', 'deferred'].includes(finding.status)) continue;
     const oldRun = task.runs.find((r) => r.id === finding.runId);
@@ -178,6 +179,7 @@ export function supersedeScopedFindings(task: Task, run: Run) {
       continue;
     if (!run.reviewSpec.criteria.some((c) => JSON.stringify(c) === JSON.stringify(oldCriterion)))
       continue;
+    if (!run.assessments?.some((a) => a.criterionId === finding.criterionId)) continue;
     finding.stale = true;
     finding.supersededBy = run.id;
   }
@@ -196,7 +198,7 @@ export function assessmentRows(task: Task) {
   // Runs are appended in creation order. Visit newest first so replacing an
   // existing scope/criterion cannot retain the Map's older insertion order.
   for (const run of task.runs.slice().reverse()) {
-    if (run.state !== 'succeeded' || !run.reviewSpec) continue;
+    if (!['succeeded', 'partial'].includes(run.state) || !run.reviewSpec) continue;
     for (const assessment of run.assessments || []) {
       const criterion = run.reviewSpec.criteria.find((c) => c.id === assessment.criterionId);
       if (!criterion) continue;

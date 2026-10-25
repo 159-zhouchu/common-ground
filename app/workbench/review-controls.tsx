@@ -28,16 +28,11 @@ export function ReviewControls({
   onChange: (spec: ReviewSpec) => void;
   onSelect: (ids: string[]) => void;
 }) {
-  const blocks = task.revisions.find((r) => r.id === task.currentRevision)!.blocks;
+  const blocks = task.revisions.find((r) => r.id === task.currentRevision)?.blocks ?? [];
   const effective = { ...spec, criteria: spec.criteria.filter((c) => selectedIds.includes(c.id)) };
   const error = reviewSpecError(effective, task);
   return (
-    <details
-      className="cg-review-controls"
-      id="review-controls"
-      role="region"
-      aria-label="审查范围与验收"
-    >
+    <details className="cg-review-controls" id="review-controls" aria-label="审查范围与验收">
       <summary>
         <span>
           <b>审查范围与验收</b>
@@ -238,6 +233,7 @@ export function AssessmentPanel({
           {scopeNames[run.reviewSpec!.mode]} · v
           {task.revisions.find((r) => r.id === run.baseRevision)?.number ?? '?'}
           {run.mode === 'demo' ? ' · 合成示例' : ''}
+          {run.state === 'partial' ? ' · 部分完成' : ''}
         </small>
         {run.reviewSpec!.focus && <p className="cg-assessment-focus">{run.reviewSpec!.focus}</p>}
         {run.reviewSpec!.mode === 'blocks' && (

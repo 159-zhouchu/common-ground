@@ -286,6 +286,25 @@ test('dynamic connections: isolated migration, routing, snapshots and privacy', 
     },
   );
   await t.test(
+    'corrupt probe log preserves successful paid-call outcome and original log',
+    async () => {
+      const file = path.join(dir, 'connection-tests.json');
+      const old = fs.readFileSync(file, 'utf8');
+      try {
+        fs.writeFileSync(file, '{broken-log');
+        const c = store.connections().find((c) => c.connectionId === 'id-2')!;
+        const result = await settings.testConnection(c);
+        assert.equal(result.success, true);
+        assert.ok(result.warning);
+        assert.notEqual(result.input, null);
+        assert.ok(store.publicConnections()[0].testLogWarning);
+        assert.equal(fs.readFileSync(file, 'utf8'), '{broken-log');
+      } finally {
+        fs.writeFileSync(file, old);
+      }
+    },
+  );
+  await t.test(
     'global request concurrency stays <=2 across runs/probes; queued cancellation is unsent; no retry or fallback',
     async () => {
       delay = 150;

@@ -9,6 +9,8 @@ import type { Connection, Manifest, Review } from './types';
 import { AppError } from './domain';
 import { reviewInput } from './document-input';
 import { limitedRequest } from './execution';
+import { readBoundedStream } from './bounded-stream';
+import { ModelOutputError, outputDiagnostic } from './model-diagnostic';
 export const ReviewSchema = z
   .object({
     summary: z.string().max(16000),
@@ -208,7 +210,7 @@ function invalidOutput() {
     502,
   );
 }
-async function providerJSON(response: Response): Promise<unknown> {
+async function providerJSON(response: Response, secret: string): Promise<unknown> {
   const tooLarge = () =>
     new AppError(
       'PROVIDER_RESPONSE_TOO_LARGE',
@@ -220,27 +222,15 @@ async function providerJSON(response: Response): Promise<unknown> {
     throw tooLarge();
   }
   if (!response.body) throw invalidOutput();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+  const bytes = await readBoundedStream(response.body, MAX_PROVIDER_RESPONSE_BYTES, tooLarge);
+  const text = new TextDecoder().decode(bytes);
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_PROVIDER_RESPONSE_BYTES) {
-        await reader.cancel();
-        throw tooLarge();
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks, total).toString('utf8'));
+    return JSON.parse(text);
   } catch {
-    throw invalidOutput();
+    throw new ModelOutputError(invalidOutput(), {
+      cost: null,
+      diagnostic: outputDiagnostic(text, [secret]),
+    });
   }
 }
 const responseEnvelope = z.object({
@@ -258,7 +248,13 @@ const chatEnvelope = z.object({
     .array(
       z.object({
         finish_reason: z.string().nullish(),
-        message: z.object({ content: z.string().nullish() }).optional(),
+        message: z
+          .object({
+            content: z
+              .union([z.string(), z.array(z.object({ type: z.literal('text'), text: z.string() }))])
+              .nullish(),
+          })
+          .optional(),
       }),
     )
     .optional(),
@@ -284,57 +280,22 @@ async function invokeNow<T>(
       502,
     );
   }
-  const raw = await providerJSON(response);
+  const raw = await providerJSON(response, c.apiKey);
   const common = z
     .object({ id: z.unknown().optional(), usage: z.unknown().optional() })
     .safeParse(raw);
-  if (!common.success) throw invalidOutput();
+  if (!common.success)
+    throw new ModelOutputError(invalidOutput(), {
+      cost: null,
+      requestId: response.headers
+        .get('x-request-id')
+        ?.split(c.apiKey || '\0')
+        .join('[redacted]')
+        .slice(0, 200),
+      diagnostic: outputDiagnostic(JSON.stringify(raw), [c.apiKey]),
+    });
   const data = common.data;
-  let text = '';
-  if (c.protocol === 'responses') {
-    const parsed = responseEnvelope.safeParse(raw);
-    if (!parsed.success) throw invalidOutput();
-    if (parsed.data.status && parsed.data.status !== 'completed')
-      throw new AppError(
-        'INCOMPLETE_OUTPUT',
-        '模型输出未完整结束，请检查输出限额后手动重试。',
-        502,
-      );
-    text = (parsed.data.output || [])
-      .flatMap((item) => item.content || [])
-      .filter((x) => x.type === 'output_text')
-      .map((x) => x.text || '')
-      .join('\n');
-  } else {
-    const parsed = chatEnvelope.safeParse(raw);
-    if (!parsed.success) throw invalidOutput();
-    const choice = parsed.data.choices?.[0];
-    if (choice?.finish_reason && choice.finish_reason !== 'stop')
-      throw new AppError('INCOMPLETE_OUTPUT', '模型输出被截断或拒绝，未生成可应用的修改。', 502);
-    text = choice?.message?.content || '';
-  }
   const redact = (value: string) => (c.apiKey ? value.split(c.apiKey).join('[密钥已移除]') : value);
-  let output: T;
-  try {
-    output = outputSchema.parse(
-      JSON.parse(
-        redact(
-          text
-            .trim()
-            .replace(/^```(?:json)?\s*/, '')
-            .replace(/\s*```$/, ''),
-        ),
-      ),
-    );
-  } catch {
-    throw invalidOutput();
-  }
-  if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_MODEL_OUTPUT_BYTES)
-    throw new AppError(
-      'OUTPUT_TOO_LARGE',
-      '模型结果超过 9 KB，未传入后续步骤；请精简任务后手动重试，已发送请求仍可能计费。',
-      502,
-    );
   const u = z
     .object({
       input_tokens: z.unknown().optional(),
@@ -352,15 +313,73 @@ async function invokeNow<T>(
     input !== null && outputTokens !== null && c.inputPrice !== null && c.outputPrice !== null
       ? (input * c.inputPrice + outputTokens * c.outputPrice) / 1e6
       : null;
-  const requestId = response.headers.get('x-request-id') || data.id;
-  return {
-    output,
-    usage: {
-      input,
-      output: outputTokens,
-      raw: { input_tokens: input, output_tokens: outputTokens },
-    },
-    cost,
-    requestId: typeof requestId === 'string' ? redact(requestId).slice(0, 200) : undefined,
+  const rawId = response.headers.get('x-request-id') || data.id;
+  const requestId = typeof rawId === 'string' ? redact(rawId).slice(0, 200) : undefined;
+  const usage = {
+    input,
+    output: outputTokens,
+    raw: { input_tokens: input, output_tokens: outputTokens },
   };
+  let text = '';
+  try {
+    if (c.protocol === 'responses') {
+      const parsed = responseEnvelope.safeParse(raw);
+      if (!parsed.success) throw invalidOutput();
+      if (parsed.data.status && parsed.data.status !== 'completed')
+        throw new AppError(
+          'INCOMPLETE_OUTPUT',
+          '模型输出未完整结束，请检查输出限额后手动重试。',
+          502,
+        );
+      text = (parsed.data.output || [])
+        .flatMap((item) => item.content || [])
+        .filter((x) => x.type === 'output_text')
+        .map((x) => x.text || '')
+        .join('\n');
+    } else {
+      const parsed = chatEnvelope.safeParse(raw);
+      if (!parsed.success) throw invalidOutput();
+      const choice = parsed.data.choices?.[0];
+      if (choice?.finish_reason && choice.finish_reason !== 'stop')
+        throw new AppError('INCOMPLETE_OUTPUT', '模型输出被截断或拒绝，未生成可应用的修改。', 502);
+      const content = choice?.message?.content;
+      text =
+        typeof content === 'string' ? content : content?.map((part) => part.text).join('') || '';
+    }
+    let output: T;
+    try {
+      output = outputSchema.parse(
+        JSON.parse(
+          redact(
+            text
+              .trim()
+              .replace(/^```(?:json)?\s*/, '')
+              .replace(/\s*```$/, ''),
+          ),
+        ),
+      );
+    } catch {
+      throw invalidOutput();
+    }
+    if (Buffer.byteLength(JSON.stringify(output), 'utf8') > MAX_MODEL_OUTPUT_BYTES)
+      throw new AppError(
+        'OUTPUT_TOO_LARGE',
+        '模型结果超过 9 KB，未传入后续步骤；请精简任务后手动重试，已发送请求仍可能计费。',
+        502,
+      );
+    return {
+      output,
+      usage,
+      cost,
+      requestId,
+    };
+  } catch (error) {
+    if (!(error instanceof AppError)) throw error;
+    throw new ModelOutputError(error, {
+      usage,
+      cost,
+      requestId,
+      diagnostic: outputDiagnostic(text || JSON.stringify(raw), [c.apiKey]),
+    });
+  }
 }

@@ -1,17 +1,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Store, Task, Connection, LegacyConnection, ConnectionTest } from './types';
-import { MAX_CONNECTIONS } from './limits';
+import { MAX_CONNECTIONS, MAX_TASKS } from './limits';
+import { isDeepStrictEqual } from 'node:util';
 import { connectionInUse, taskInFlight } from './execution';
 import { seed, now } from './seed';
 import { AppError, requireIdle, current } from './domain';
 import { writeAtomic } from './atomic-file';
 import { jsonStore } from './json-store';
+import { workspaceSummary } from './workspace-summary';
+import { taskContent, type TaskContent } from './task-views';
+import {
+  readStoredJSON,
+  ConnectionList,
+  LegacyConnectionList,
+  StoredConnectionTests,
+} from './storage-validation';
 export { writeAtomic } from './atomic-file';
 // Local mutable state must never be bundled into a traced deployment artifact.
 const root = path.resolve(/*turbopackIgnore: true*/ process.env.CG_DATA_DIR || '.data');
 const file = path.join(root, 'workspace.json');
-const workspace = jsonStore<Store>(file, seed, (s) => {
+export function recoverWorkspace(s: Store) {
   let changed = false;
   for (const t of s.tasks)
     for (const r of t.runs)
@@ -24,13 +33,32 @@ const workspace = jsonStore<Store>(file, seed, (s) => {
           if (step.status === 'running' || step.status === 'queued') step.status = 'cancelled';
       }
   return changed;
-});
-function ensure() {
-  workspace.read(() => null);
 }
+const workspace = jsonStore<Store>(
+  file,
+  seed,
+  recoverWorkspace,
+  (s) =>
+    !!s &&
+    s.version === 1 &&
+    Array.isArray(s.tasks) &&
+    [...s.tasks, ...(s.archivedTasks || [])].every(
+      (t) =>
+        !!t &&
+        Array.isArray(t.revisions) &&
+        Array.isArray(t.runs) &&
+        Array.isArray(t.sources) &&
+        Array.isArray(t.findings) &&
+        Array.isArray(t.messages) &&
+        Array.isArray(t.impacts) &&
+        t.revisions.some((r) => r.id === t.currentRevision && Array.isArray(r.blocks)),
+    ),
+);
 export function readStore(): Store {
   return workspace.read();
 }
+export const readWorkspaceSummary = () => workspace.read(workspaceSummary);
+export const workspaceRevisionTag = () => workspace.revisionTag();
 export function transact<T>(fn: (s: Store) => T): T {
   return workspace.transact(fn);
 }
@@ -39,12 +67,36 @@ export function getTask(id: string) {
   if (!t) throw new AppError('NOT_FOUND', '项目不存在', 404);
   return t;
 }
+export function getTaskContent(id: string, view: TaskContent['contentView']) {
+  const result = workspace.read((s) => {
+    const task = s.tasks.find((t) => t.id === id);
+    return task ? taskContent(task, view) : undefined;
+  });
+  if (!result) throw new AppError('NOT_FOUND', '项目不存在', 404);
+  return result;
+}
+export function getRunAudit(taskId: string, runId: string) {
+  const run = workspace.read((s) =>
+    s.tasks.find((t) => t.id === taskId)?.runs.find((r) => r.id === runId),
+  );
+  if (!run) throw new AppError('NOT_FOUND', '调用记录不存在', 404);
+  return { run };
+}
+export function runPrimaryConnection(taskId: string, runId: string) {
+  return workspace.read((s) => {
+    const task = s.tasks.find((t) => t.id === taskId);
+    if (!task) throw new AppError('NOT_FOUND', '项目不存在', 404);
+    return task.runs.find((run) => run.id === runId)?.roleAssignments?.a;
+  });
+}
 export function editTask<T>(id: string, fn: (t: Task) => T) {
   return transact((s) => {
     const t = s.tasks.find((t) => t.id === id);
     if (!t) throw new AppError('NOT_FOUND', '项目不存在', 404);
+    const before = structuredClone(t);
     const r = fn(t);
-    t.updatedAt = now();
+    if (!isDeepStrictEqual(before, t))
+      t.updatedAt = new Date(Math.max(Date.now(), Date.parse(before.updatedAt) + 1)).toISOString();
     return r;
   });
 }
@@ -77,7 +129,7 @@ export function restoreTask(id: string) {
   return transact((s) => {
     const t = s.archivedTasks?.find((t) => t.id === id);
     if (!t) throw new AppError('NOT_FOUND', '回收站项目不存在', 404);
-    if (s.tasks.length >= 50)
+    if (s.tasks.length >= MAX_TASKS)
       throw new AppError('TASK_LIMIT', '项目已达 50 个，请先移走其他项目。');
     if (s.tasks.some((x) => x.id === id))
       throw new AppError('TASK_CONFLICT', '项目标识已存在。', 409);
@@ -102,14 +154,16 @@ const defaultConnection = (slot: 'a' | 'b'): Connection => ({
   outputPrice: null,
 });
 export function connections(): Connection[] {
-  ensure();
   const p = path.join(root, 'connections.json');
   if (!fs.existsSync(p)) return [defaultConnection('a'), defaultConnection('b')];
-  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-  if (raw.version === 2 && Array.isArray(raw.connections)) return raw.connections;
+  const raw = readStoredJSON<Connection[] | { version: 2; connections: Connection[] }>(
+    p,
+    (value): value is Connection[] | { version: 2; connections: Connection[] } =>
+      ConnectionList.safeParse(value).success || LegacyConnectionList.safeParse(value).success,
+  );
+  if (!Array.isArray(raw)) return raw.connections;
   if (
-    !Array.isArray(raw) ||
-    raw.some((c) => !['a', 'b'].includes(c.slot)) ||
+    raw.some((c) => !c.slot || !['a', 'b'].includes(c.slot)) ||
     new Set(raw.map((c) => c.slot)).size !== raw.length
   )
     throw new AppError(
@@ -159,11 +213,28 @@ export function saveConnections(input: (Connection | LegacyConnection)[]) {
       );
   writeAtomic(path.join(root, 'connections.json'), { version: 2, connections: c });
 }
-export function publicConnections() {
+export function connectionTests(): ConnectionTest[] {
   const p = path.join(root, 'connection-tests.json');
-  const tests: ConnectionTest[] = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : [];
+  return fs.existsSync(p)
+    ? readStoredJSON(
+        p,
+        (value): value is ConnectionTest[] => StoredConnectionTests.safeParse(value).success,
+      )
+    : [];
+}
+export function publicConnections(includeTests = true) {
+  let tests: ConnectionTest[] = [];
+  let testLogWarning: string | undefined;
+  if (includeTests) {
+    try {
+      tests = connectionTests();
+    } catch {
+      testLogWarning = '连接测试日志不可读；原文件保留，请按数据恢复说明检查。连接配置仍可使用。';
+    }
+  }
   return connections().map(({ apiKey, ...c }) => ({
     ...c,
+    ...(testLogWarning ? { testLogWarning } : {}),
     configured: !!apiKey && !!c.model,
     hasKey: !!apiKey,
     inUse: connectionInUse(c.connectionId),

@@ -5,6 +5,66 @@ import os from 'node:os';
 import path from 'node:path';
 import { jsonStore } from '../lib/json-store';
 
+test('locked checkpoint warns without blocking primary commit or changing the previous backup', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-backup-lock-'));
+  try {
+    const file = path.join(dir, 'state.json');
+    const store = jsonStore(file, () => ({ count: 0 }));
+    store.read();
+    fs.writeFileSync(file + '.bak', 'previous checkpoint');
+    const copy = mock.method(fs, 'copyFileSync', () => {
+      throw Object.assign(new Error('locked private path'), { code: 'EBUSY' });
+    });
+    const warn = mock.method(console, 'warn', () => {});
+    store.transact((s) => {
+      s.count = 1;
+    });
+    assert.equal(store.read().count, 1);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).count, 1);
+    assert.equal(fs.readFileSync(file + '.bak', 'utf8'), 'previous checkpoint');
+    assert.deepEqual(warn.mock.calls[0].arguments, [
+      { code: 'CHECKPOINT_FAILED', file: 'state.json', reason: 'EBUSY' },
+    ]);
+    copy.mock.restore();
+    warn.mock.restore();
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('no-op transactions preserve file timestamp; corrupt primary never overwrites known-good checkpoint', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-checkpoint-'));
+  try {
+    const file = path.join(dir, 'state.json');
+    const store = jsonStore(file, () => ({ count: 0 }));
+    store.read();
+    const first = fs.statSync(file, { bigint: true }).mtimeNs;
+    store.transact(() => undefined);
+    assert.equal(fs.statSync(file, { bigint: true }).mtimeNs, first);
+    store.transact((s) => {
+      s.count = 1;
+    });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file + '.bak', 'utf8')), { count: 0 });
+    const backup = fs.readFileSync(file + '.bak', 'utf8');
+    fs.writeFileSync(file, '{corrupt');
+    assert.throws(() => store.read(), /损坏/);
+    assert.throws(
+      () =>
+        store.transact((s) => {
+          s.count++;
+        }),
+      /损坏/,
+    );
+    assert.equal(fs.readFileSync(file, 'utf8'), '{corrupt');
+    assert.equal(fs.readFileSync(file + '.bak', 'utf8'), backup);
+    fs.writeFileSync(file, JSON.stringify({ count: 2 }));
+    assert.equal(store.read().count, 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('cached JSON transactions are durable, isolated and do not repeatedly read unchanged files', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-json-'));
   const file = path.join(dir, 'state.json');

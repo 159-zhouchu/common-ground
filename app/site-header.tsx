@@ -52,7 +52,7 @@ export default function SiteHeader() {
               </AppLink>
             ))}
           </nav>
-          <span className="site-local" role="status" title="本机工作空间" aria-label="本机工作空间">
+          <span className="site-local" title="本机工作空间">
             <i aria-hidden="true" />
             <span className="site-local-full">本机工作空间</span>
             <span className="site-local-short" aria-hidden="true">

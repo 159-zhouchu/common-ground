@@ -21,7 +21,7 @@ function tool(name, description, inputSchema, fn, readOnly = false) {
       inputSchema,
       annotations: {
         readOnlyHint: readOnly,
-        destructiveHint: false,
+        destructiveHint: !readOnly,
         idempotentHint: true,
         openWorldHint: !readOnly,
       },

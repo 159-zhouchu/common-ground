@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Task, Run, RunOptions, Review, Connection, ConnectionSnapshot } from './types';
+import type { Task, Run, RunOptions, Review, Connection, ConnectionSnapshot, Step } from './types';
 import { AppError, current, manifest, normalizeReview, plan, uid } from './domain';
 import { connections, editTask, getTask } from './store';
 import { exampleReview, now } from './seed';
@@ -15,6 +15,7 @@ import {
   supersedeScopedFindings,
 } from './review-scope';
 import { MAX_MODEL_OUTPUT_BYTES } from './limits';
+import { ModelOutputError, outputDiagnostic } from './model-diagnostic';
 const globalRun = globalThis as typeof globalThis & {
   cgControllers?: Map<string, AbortController>;
 };
@@ -35,29 +36,34 @@ export function startRun(
     contextMode: opts.mode === 'demo' ? 'continue' : opts.contextMode,
   };
   if (opts.reviewSpec) opts.reviewSpec = ReviewSpecSchema.parse(opts.reviewSpec);
+  const fingerprintInput = (legacy: boolean) => ({
+    strategy: opts.strategy,
+    selfCheck: opts.selfCheck,
+    mode: opts.mode,
+    contextMode: opts.contextMode,
+    slot: opts.slot,
+    compareRole: opts.compareRole || 'a',
+    budget: opts.budget,
+    ...(legacy
+      ? { baseRevision: opts.baseRevision ?? null }
+      : { requestedBaseRevision: opts.baseRevision ?? null }),
+    roles: opts.roleAssignments ? [opts.roleAssignments.a, opts.roleAssignments.b ?? null] : null,
+    reviewSpec: opts.reviewSpec ?? null,
+    discussionQuestion: discussionQuestion ?? null,
+  });
   const requestFingerprint = createHash('sha256')
-    .update(
-      JSON.stringify({
-        strategy: opts.strategy,
-        selfCheck: opts.selfCheck,
-        mode: opts.mode,
-        contextMode: opts.contextMode,
-        slot: opts.slot,
-        compareRole: opts.compareRole || 'a',
-        budget: opts.budget,
-        baseRevision: opts.baseRevision ?? null,
-        roles: opts.roleAssignments
-          ? [opts.roleAssignments.a, opts.roleAssignments.b ?? null]
-          : null,
-        reviewSpec: opts.reviewSpec ?? null,
-        discussionQuestion: discussionQuestion ?? null,
-      }),
-    )
+    .update(JSON.stringify(fingerprintInput(false)))
+    .digest('hex');
+  const legacyFingerprint = createHash('sha256')
+    .update(JSON.stringify(fingerprintInput(true)))
     .digest('hex');
   const task = getTask(taskId);
   const duplicate = task.runs.find((r) => r.id === idempotencyKey);
   if (duplicate) {
-    if (duplicate.requestFingerprint !== requestFingerprint)
+    if (
+      duplicate.requestFingerprint !== requestFingerprint &&
+      duplicate.requestFingerprint !== legacyFingerprint
+    )
       throw new AppError(
         'IDEMPOTENCY_CONFLICT',
         '该请求标识已用于其他参数或旧版记录，请使用新的请求标识。',
@@ -217,25 +223,42 @@ async function execute(
   configs: Partial<Record<'a' | 'b', Connection>>,
 ) {
   let reserved = 0;
+  const completed = new Map<string, Review>();
   const perform = async (index: number, prior: Review[] = []) => {
     if (!alive(getTask(snapshot.id), run.id)) return null;
     const step = run.steps[index];
     const c = configs[step.slot as 'a' | 'b'];
     const mode = step.duty === 'compare' ? 'continue' : run.contextMode;
-    const m = manifest(snapshot, mode, undefined, run.reviewSpec);
+    const baseManifest = manifest(snapshot, mode, undefined, run.reviewSpec);
+    const m = { ...baseManifest };
     if (prior.length) {
       m.priorOutputs = prior;
       m.hash = createHash('sha256')
         .update(JSON.stringify({ ...m, hash: undefined }))
         .digest('hex');
     }
+    let received:
+      | {
+          review: Review;
+          usage: NonNullable<Step['usage']>;
+          cost: number | null;
+          requestId?: string;
+        }
+      | undefined;
     try {
       const prepared = run.mode === 'live' ? modelRequest(c!, m, step.duty) : null;
       editTask(snapshot.id, (t) => {
-        const s = t.runs.find((r) => r.id === run.id)!.steps[index];
+        const r = t.runs.find((r) => r.id === run.id)!;
+        const s = r.steps[index];
         s.status = 'running';
         s.startedAt = now();
-        s.manifest = m;
+        (r.inputManifests ??= {})[baseManifest.hash] ??= baseManifest;
+        s.manifestKey = baseManifest.hash;
+        s.manifestHash = m.hash;
+        s.priorStepIds = [...completed]
+          .filter(([, output]) => prior.includes(output))
+          .map(([id]) => id);
+        s.inputHash = prepared?.inputHash;
         s.model = c?.model || '预置示例';
         s.sent = false;
       });
@@ -292,10 +315,6 @@ async function execute(
               : '保守预留金额超过预算；未发送本次请求。',
           );
         if (reserve !== null) reserved += reserve;
-        editTask(snapshot.id, (t) => {
-          const step = t.runs.find((r) => r.id === run.id)!.steps[index];
-          step.inputHash = req.inputHash;
-        });
         const timeout = AbortSignal.timeout(
           Math.max(1, Math.min(90000, run.deadline - Date.now())),
         );
@@ -307,14 +326,7 @@ async function execute(
         // Unreported usage keeps its reservation; concurrent calls retain their own reservations.
         if (reserve !== null && result.cost !== null) reserved += result.cost - reserve;
       }
-      editTask(snapshot.id, (t) => {
-        const r = t.runs.find((r) => r.id === run.id)!;
-        const s = r.steps[index];
-        s.endedAt = now();
-        s.usage = result.usage;
-        s.cost = result.cost;
-        s.requestId = result.requestId;
-      });
+      received = result;
       if (run.reviewSpec) {
         const error = run.mode === 'live' ? scopedOutputError(run.reviewSpec, result.review) : '';
         if (error) throw new AppError('REVIEW_SCOPE', error);
@@ -331,10 +343,15 @@ async function execute(
       editTask(snapshot.id, (t) => {
         const r = t.runs.find((r) => r.id === run.id)!;
         const s = r.steps[index];
+        s.endedAt = now();
+        s.usage = result.usage;
+        s.cost = result.cost;
+        s.requestId = result.requestId;
         s.output = result.review;
         s.result = result.review.summary;
         s.status = r.state === 'running' ? 'completed' : 'cancelled';
       });
+      completed.set(step.id, result.review);
       return alive(getTask(snapshot.id), run.id) ? result.review : null;
     } catch (error) {
       const message = controller.signal.aborted
@@ -344,6 +361,14 @@ async function execute(
           : '无法完成模型请求，请检查网络与接口配置；未自动重试。';
       editTask(snapshot.id, (t) => {
         const s = t.runs.find((r) => r.id === run.id)!.steps[index];
+        if (received) {
+          s.usage = received.usage;
+          s.cost = received.cost;
+          s.requestId = received.requestId;
+          s.diagnostic = outputDiagnostic(JSON.stringify(received.review), [c?.apiKey || '']);
+        } else if (error instanceof ModelOutputError) {
+          Object.assign(s, error.audit);
+        }
         s.status = controller.signal.aborted ? 'cancelled' : 'failed';
         if (!s.sent) s.cost = 0;
         s.error = message;
@@ -382,7 +407,9 @@ async function execute(
         : 'failed';
     r.endedAt = now();
     r.summary = result?.summary || '没有取得可用结果，请查看失败记录。';
-    if (result?.assessments && r.state === 'succeeded') r.assessments = result.assessments;
+    // Sequential partial runs retain the last usable conclusion. An unfinished
+    // S1 comparison only retains candidates, never a shared conclusion.
+    if (result?.assessments) r.assessments = result.assessments;
     if (result) {
       supersedeScopedFindings(t, r);
       const findings = normalizeReview(snapshot, result, r.id, r.baseRevision);

@@ -1,5 +1,7 @@
 // Saved configurations, participants and simultaneous requests are different limits.
 export const MAX_CONNECTIONS = 10;
+export const MAX_TASKS = 50;
+export const MAX_SOURCES = 20;
 export const MAX_CONCURRENT_REQUESTS = 2;
 export const MAX_BLOCK_CHARACTERS = 50000;
 export const MAX_DOCUMENT_CHARACTERS = 150000;

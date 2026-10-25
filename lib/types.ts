@@ -99,6 +99,10 @@ export type Step = {
   result?: string;
   error?: string;
   manifest?: Manifest;
+  manifestKey?: string;
+  manifestHash?: string;
+  priorStepIds?: string[];
+  diagnostic?: { excerpt: string; bytes: number; truncated: boolean; hash: string };
   inputHash?: string;
   startedAt?: string;
   endedAt?: string;
@@ -110,6 +114,7 @@ export type Step = {
   sent?: boolean;
 };
 export type Run = {
+  inputManifests?: Record<string, Manifest>;
   requestFingerprint?: string;
   reviewSpec?: ReviewSpec;
   assessments?: Assessment[];
@@ -201,6 +206,7 @@ export type LegacyConnection = Omit<
   'connectionId' | 'enabled' | 'createdAt' | 'updatedAt'
 > & { slot: 'a' | 'b' };
 export type ConnectionTest = {
+  warning?: string;
   id: string;
   connectionId?: string;
   slot?: string;
@@ -217,6 +223,7 @@ export type ConnectionTest = {
   configUpdatedAt?: string | null;
 };
 export type PublicConnection = Omit<Connection, 'apiKey'> & {
+  testLogWarning?: string;
   configured: boolean;
   hasKey: boolean;
   inUse: boolean;

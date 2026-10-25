@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { quoteLines, inlineDiff } from '@/lib/text';
 
@@ -9,6 +9,7 @@ export function Sheet({
   wide,
   children,
   returnFocus,
+  focusKey,
 }: {
   title: string;
   open: boolean;
@@ -16,6 +17,7 @@ export function Sheet({
   wide?: boolean;
   children: ReactNode;
   returnFocus: HTMLElement | null;
+  focusKey?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null),
     backdropStart = useRef(false);
@@ -51,6 +53,11 @@ export function Sheet({
       window.scrollTo({ top: y, behavior: 'instant' });
     };
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    // A different drawer can reuse the same open dialog.
+    ref.current?.querySelector<HTMLButtonElement>('header button')?.focus({ preventScroll: true });
+  }, [open, title, focusKey]);
   return (
     <dialog
       className={'cg-sheet ' + (wide ? 'wide' : '')}
@@ -92,15 +99,6 @@ export function Highlight({ text, quote }: { text: string; quote?: string }) {
       <mark>{quote}</mark>
       {text.slice(index + quote!.length)}
     </>
-  );
-}
-export function JsonBlock({ value }: { value: unknown }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <details onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
-      <summary>完整输入、输出与请求记录</summary>
-      {open && <pre>{JSON.stringify(value, null, 2)}</pre>}
-    </details>
   );
 }
 

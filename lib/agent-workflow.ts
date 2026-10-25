@@ -1,10 +1,12 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { StoredAgentJobs } from './storage-validation';
 import { z } from 'zod';
 import { AppError } from './domain';
 import { connections } from './store';
 import { lockConnections } from './execution';
 import { structuredRequest, invokeStructured, reserveCost } from './models';
+import { ModelOutputError } from './model-diagnostic';
 import {
   AgentRequestSchema,
   AgentAdviceSchema,
@@ -85,7 +87,9 @@ const jobStore = jsonStore<AgentJob[]>(
       }
     return changed;
   },
+  (value) => StoredAgentJobs.safeParse(value).success,
 );
+export const agentStorageReady = () => jobStore.read(() => true);
 function readJobs() {
   return jobStore.read();
 }
@@ -283,6 +287,7 @@ async function execute(
             ? error.message
             : '模型请求未完成，请检查网络与配置；未自动重试。';
         s.cost = sent ? null : 0;
+        if (error instanceof ModelOutputError) Object.assign(s, error.audit);
         s.endedAt = timestamp();
       });
       return null;

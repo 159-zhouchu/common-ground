@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { freePort, waitForInstance } from './local-server.mjs';
+import { writeReport } from './write-report.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-agent-http-'));
 const port = await freePort(),
@@ -220,8 +221,7 @@ try {
     scope: '临时数据、本机模拟供应商；未调用真实模型',
     checks,
   };
-  fs.mkdirSync('docs/evidence', { recursive: true });
-  fs.writeFileSync('docs/evidence/agent-checks.json', JSON.stringify(report, null, 2));
+  writeReport('agent-checks.json', report);
   console.log(JSON.stringify(report, null, 2));
 } finally {
   await mcp?.close();

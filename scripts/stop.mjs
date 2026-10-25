@@ -8,6 +8,7 @@ import {
   clearOwner,
   matches,
   delay,
+  recordedProcessAlive,
 } from './launcher-state.mjs';
 
 const dir = path.resolve(process.env.CG_DATA_DIR || '.data'),
@@ -35,7 +36,7 @@ async function main() {
   )
     throw new Error('启动记录格式无效，未发送停止请求；记录已保留。');
   const h = await health(owner.port);
-  if (!h && !alive(owner.pid)) {
+  if (!h && !recordedProcessAlive(owner)) {
     clearOwner(dir, owner);
     console.log('共桌已停止；已清理过期启动记录。');
     return;

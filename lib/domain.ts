@@ -140,7 +140,7 @@ export function normalizeReview(
   runId: string,
   baseRevision: string,
 ): Finding[] {
-  return review.findings.slice(0, 12).map((f) => {
+  return review.findings.map((f) => {
     const s = task.sources.find((s) => s.id === f.sourceId);
     const b = current(task).blocks.find((b) => b.id === f.blockId);
     return {
@@ -191,8 +191,9 @@ export function impactFor(
     return { id: uid(), blockId: b.id, title: b.title, state, reason, rule, createdAt: now() };
   });
 }
-export function markdown(task: Task, review = false) {
-  const r = current(task);
+export function markdown(task: Task, review = false, revisionId = task.currentRevision) {
+  const r = task.revisions.find((r) => r.id === revisionId);
+  if (!r) throw new AppError('NOT_FOUND', '导出版本不存在', 404);
   return (
     '# ' +
     task.title +
@@ -211,7 +212,7 @@ export function markdown(task: Task, review = false) {
         assessmentRows(task)
           .map(
             ({ run, criterion, assessment, staleReason }) =>
-              `### ${criterion.title}\n\n范围：${scopeNames[run.reviewSpec!.mode]}${run.reviewSpec!.focus ? ' · ' + run.reviewSpec!.focus : ''}\n\n验收标准：${criterion.standard}\n\n结论：${verdictNames[assessment.verdict]}${staleReason ? '（待复核）' : ''}${run.mode === 'demo' ? ' · 合成示例' : ''}\n\n版本：v${task.revisions.find((v) => v.id === run.baseRevision)?.number ?? '?'}\n\n${assessment.reason}\n\n${staleReason}\n\n${assessment.evidence.map((e) => `依据（${e.blockId || e.sourceId}）：${e.quote}`).join('\n\n')}`,
+              `### ${criterion.title}\n\n范围：${scopeNames[run.reviewSpec!.mode]}${run.reviewSpec!.focus ? ' · ' + run.reviewSpec!.focus : ''}\n\n验收标准：${criterion.standard}\n\n结论：${verdictNames[assessment.verdict]}${staleReason ? '（待复核）' : ''}${run.state === 'partial' ? ' · 部分完成' : ''}${run.mode === 'demo' ? ' · 合成示例' : ''}\n\n版本：v${task.revisions.find((v) => v.id === run.baseRevision)?.number ?? '?'}\n\n${assessment.reason}\n\n${staleReason}\n\n${assessment.evidence.map((e) => `依据（${e.blockId || e.sourceId}）：${e.quote}`).join('\n\n')}`,
           )
           .join('\n\n') +
         '\n\n## 问题与依据记录\n\n处理状态截至导出时，正文绑定上述版本。\n\n' +

@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { freePort } from './local-server.mjs';
+import { writeReport } from './write-report.mjs';
 import { alive } from '../scripts/launcher-state.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-launcher-'));
@@ -139,8 +140,28 @@ try {
   assert.ok(!fs.existsSync(pidFile));
   assert.ok(!fs.existsSync(ownerFile));
   checks.push('按记录端口停止真实 Next，确认进程退出和端口关闭后才清理记录');
+  const connectionsFile = path.join(dir, 'connections.json');
+  fs.writeFileSync(connectionsFile, '{degraded-test');
   result = await command('start');
   assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /部分本机存储不可用/);
+  ownedPid = JSON.parse(fs.readFileSync(ownerFile, 'utf8')).pid;
+  assert.equal((await health()).ready, false);
+  assert.equal(fs.readFileSync(connectionsFile, 'utf8'), '{degraded-test');
+  result = await command('stop');
+  assert.equal(result.code, 0, result.output);
+  assert.equal(await health(), null);
+  ownedPid = undefined;
+  checks.push('连接存储损坏时启动器保留可运行的降级服务并允许正常停止');
+  write({
+    ...owner,
+    pid: process.pid,
+    identity: { birth: 'old-process-creation', executable: process.execPath },
+  });
+  result = await command('start');
+  assert.equal(result.code, 0, result.output);
+  process.kill(process.pid, 0);
+  checks.push('PID 被复用但创建时间不同：清除过期启动阻塞，不终止现存进程');
   const second = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
   ownedPid = second.pid;
   assert.notEqual(second.token, owner.token);
@@ -158,6 +179,16 @@ try {
   result = await command('stop');
   assert.equal(result.code, 0, result.output);
   checks.push('重复停止幂等');
+  write({
+    ...owner,
+    pid: process.pid,
+    identity: { birth: 'old-process-creation', executable: process.execPath },
+  });
+  result = await command('stop');
+  assert.equal(result.code, 0, result.output);
+  process.kill(process.pid, 0);
+  assert.equal(fs.existsSync(ownerFile), false);
+  checks.push('过期 owner 指向复用 PID 时只清理记录，不发送信号给该进程');
   fs.writeFileSync(pidFile, String(process.pid));
   result = await command('stop');
   assert.equal(result.code, 0, result.output);
@@ -203,7 +234,6 @@ try {
   assert.ok(fs.existsSync(pidFile));
   process.kill(process.pid, 0);
   checks.push('服务接受停止但不退出：超时返回失败并保留全部启动记录');
-  fs.mkdirSync('docs/evidence', { recursive: true });
   const report = {
     at: new Date().toISOString(),
     platform: process.platform,
@@ -213,7 +243,7 @@ try {
     passed: checks.length,
     checks,
   };
-  fs.writeFileSync('docs/evidence/launcher-checks.json', JSON.stringify(report, null, 2));
+  writeReport('launcher-checks.json', report);
   console.log(JSON.stringify(report, null, 2));
 } finally {
   if (ownedPid)

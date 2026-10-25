@@ -25,7 +25,14 @@ export async function request(route, body, base = localBase()) {
     signal: AbortSignal.timeout(15000),
     redirect: 'error',
   });
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error(
+      `本机接口返回非 JSON 响应（HTTP ${response.status}），请核对端口、服务及代理设置。`,
+    );
+  }
   if (!response.ok) throw new Error(data.error || `本机接口返回 ${response.status}`);
   return data;
 }
@@ -76,21 +83,29 @@ function sensitivePath(relative) {
   return relative
     .split(/[\\/]/)
     .some((part) =>
-      /^(?:\.env.*|\.data|\.git|\.gitconfig|\.codex|\.ssh|\.aws|\.npmrc|node_modules|workspace\.json|credentials?\.json|connections(?:-v1)?\.json|id_(?:rsa|dsa|ed25519)(?:\.pub)?|.*\.(?:pem|key|crt|p12|pfx))$/i.test(
+      /^(?:\.env.*|\.data|\.git|\.gitconfig|\.codex|\.ssh|\.aws|\.npmrc|\.netrc|_netrc|\.git-credentials|\.pgpass|\.docker|\.kube|\.config|\.azure|\.gnupg|\.m2|\.gradle|\.terraform\.d|\.terraformrc|credentials\.tfrc\.json|.*\.tfstate(?:\.backup)?|\.pypirc|\.vault-token|\.s3cfg|\.databrickscfg|\.my\.cnf|gcloud|application_default_credentials\.json|service[-_]?account.*\.json|logins\.json|key\d\.db|cert\d\.db|cookies\.sqlite(?:-(?:wal|shm))?|\.bash_history|\.zsh_history|\.yarnrc(?:\..*)?|node_modules|workspace\.json|credentials?\.json|auth\.json|client_secret\.json|secrets?\.json|token\.json|cookies?|login data|local state|web data|agent-jobs\.json|server-owner\.json|server\.pid|launcher\.lock|connections(?:-v1)?\.json|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|.*\.(?:pem|key|crt|p12|pfx|bak|tmp|log))$/i.test(
         part,
       ),
     );
 }
 export async function requestRoot(file) {
   const absolute = path.resolve(file);
-  if (sensitivePath(path.basename(absolute))) throw new Error('请求文件不能使用敏感文件名。');
+  if (sensitivePath(absolute) || absolute.slice(path.parse(absolute).root.length).includes(':'))
+    throw new Error('请求文件不能位于敏感目录、使用敏感文件名或备用数据流。');
   const root = await fs.realpath(path.dirname(absolute));
   const real = await fs.realpath(absolute);
+  if (sensitivePath(real)) throw new Error('请求文件不能指向敏感目录或文件。');
   if (path.dirname(real) !== root) throw new Error('请求文件不能通过符号链接越出所在目录。');
   return { root, absolute: real };
 }
 export async function scopedFile(root, name, output = false) {
-  if (typeof name !== 'string' || !name || name.includes('\0')) throw new Error('文件路径无效。');
+  if (
+    typeof name !== 'string' ||
+    !name ||
+    name.includes('\0') ||
+    name.slice(path.parse(name).root.length).includes(':')
+  )
+    throw new Error('文件路径无效。');
   const resolved = path.resolve(root, name);
   const relative = path.relative(root, resolved);
   if (
@@ -98,7 +113,7 @@ export async function scopedFile(root, name, output = false) {
     relative === '..' ||
     relative.startsWith('..' + path.sep) ||
     path.isAbsolute(relative) ||
-    sensitivePath(relative)
+    sensitivePath(resolved)
   )
     throw new Error('文件必须位于请求文件所在目录内，且不能是密钥或本机私有配置。');
   const real = output
@@ -109,7 +124,7 @@ export async function scopedFile(root, name, output = false) {
     realRelative === '..' ||
     realRelative.startsWith('..' + path.sep) ||
     path.isAbsolute(realRelative) ||
-    sensitivePath(realRelative)
+    sensitivePath(real)
   )
     throw new Error('文件符号链接越出目录或指向敏感配置。');
   return real;

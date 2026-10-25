@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { alive, readJSON } from './launcher-state.mjs';
+import { processIdentity, recordedProcessAlive, readJSON } from './launcher-state.mjs';
 
 const incompleteGraceMs = 5000;
 const busy = () => new Error('启动器正在工作或锁记录正在写入，请等待 5 秒后重试。');
@@ -26,8 +26,12 @@ export function acquireLauncherLock(file) {
         const before = fs.statSync(file);
         const previous = readJSON(file);
         const validPid = Number.isSafeInteger(previous?.pid) && previous.pid > 0;
-        // A live owner always wins, including when its record is very old.
-        if (validPid ? alive(previous.pid) : Date.now() - before.mtimeMs < incompleteGraceMs)
+        // Keep live/unknown owners; recover a record only when demonstrably stale.
+        if (
+          validPid
+            ? recordedProcessAlive(previous)
+            : Date.now() - before.mtimeMs < incompleteGraceMs
+        )
           throw busy();
         // Do not remove a record that changed while it was being inspected.
         if (!sameFile(before, fs.statSync(file))) continue;
@@ -38,7 +42,10 @@ export function acquireLauncherLock(file) {
       continue;
     }
     try {
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, token }));
+      fs.writeFileSync(
+        fd,
+        JSON.stringify({ pid: process.pid, token, identity: processIdentity(process.pid) }),
+      );
     } catch (error) {
       fs.closeSync(fd);
       fs.rmSync(file, { force: true });

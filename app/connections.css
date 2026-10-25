@@ -32,8 +32,8 @@
 .api-edit-note{margin:var(--space-3) 0}
 .api-check{flex-direction:row!important;align-items:flex-start;gap:var(--space-2)!important}
 .api-check input{accent-color:var(--accent);margin:5px 0 0}
-.api-secret-input{display:flex;position:relative;align-items:center}
-.api-secret-input input{padding-right:var(--space-7)}
+.api-secret-input{display:flex;position:relative;align-items:center;width:100%}
+.api-secret-input input{width:100%;padding-right:var(--space-7)}
 .api-secret-input button{position:absolute;right:2px;min-width:var(--control-height);min-height:var(--control-height);border-radius:var(--radius-sm)}
 .api-secret-input button:hover{background:var(--surface-hover)}
 .api-advanced{border-top:1px solid var(--border);margin-top:var(--space-5);padding-top:var(--space-4)}

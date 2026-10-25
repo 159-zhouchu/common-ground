@@ -18,23 +18,10 @@ import type { PublicConnection, Connection, ConnectionTest } from '@/lib/types';
 import { formatMoney } from '@/lib/presentation';
 import { MAX_CONNECTIONS } from '@/lib/limits';
 import { AppLink } from './site-header';
+import { api as request } from '@/lib/client-api';
+import { browserUUID } from '@/lib/browser-storage';
+import { exportDate as stamp } from '@/lib/text';
 type Draft = Omit<Connection, 'createdAt' | 'updatedAt'> & { hasKey: boolean; clearKey: boolean };
-async function request(path: string, body?: unknown) {
-  const r = await fetch('/api/' + path, {
-    cache: 'no-store',
-    ...(body
-      ? {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      : {}),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || '请求失败');
-  return data;
-}
-const stamp = (s: string) => new Date(s).toLocaleString('zh-CN');
 function publicDraft(c: PublicConnection): Draft {
   return {
     connectionId: c.connectionId,
@@ -127,7 +114,7 @@ export default function ConnectionEditor({
       return;
     }
     const next: Draft = {
-      connectionId: crypto.randomUUID(),
+      connectionId: browserUUID(),
       label: '',
       baseURL: 'https://api.openai.com/v1',
       apiKey: '',
@@ -194,7 +181,7 @@ export default function ConnectionEditor({
         confirmCall: true,
       });
       setProbe(result);
-      setNotice('所选连接本次测试通过；不代表模型质量或所有任务均可用。');
+      setNotice(result.warning || '所选连接本次测试通过；不代表模型质量或所有任务均可用。');
       await load();
     } catch (e) {
       setError(
@@ -223,6 +210,11 @@ export default function ConnectionEditor({
           </AppLink>
         )}
       </div>
+      {items.some((c) => c.testLogWarning) && (
+        <div role="status" className="api-feedback">
+          {items.find((c) => c.testLogWarning)?.testLogWarning}
+        </div>
+      )}
       {error && (
         <div className="api-feedback error" role="alert">
           <AlertCircle size={17} />
@@ -301,10 +293,11 @@ export default function ConnectionEditor({
                 onChange={(e) => update({ model: e.target.value })}
               />
             </label>
-            <label>
-              API Key
+            <div className="api-secret-field">
+              <label htmlFor="connection-api-key">API Key</label>
               <span className="api-secret-input">
                 <input
+                  id="connection-api-key"
                   aria-label="API Key"
                   autoComplete="off"
                   type={visible ? 'text' : 'password'}
@@ -322,7 +315,7 @@ export default function ConnectionEditor({
                 </button>
               </span>
               <small>已保存密钥不回传页面；更改地址须重新填写或清除密钥。</small>
-            </label>
+            </div>
             {draft.hasKey && (
               <label className="api-check">
                 <input

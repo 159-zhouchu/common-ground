@@ -17,22 +17,10 @@ import { MAX_AGENT_INITIAL_BYTES } from '@/lib/limits';
 import { AppLink } from '../site-header';
 import type { PublicConnection } from '@/lib/types';
 import { collectAgentContext, parseAgentRelay, agentRelayBrief } from '@/lib/agent-relay';
+import { api as call, downloadBlob } from '@/lib/client-api';
+import { retryKey, clearRetryKey } from '@/lib/browser-storage';
+import { exportDate } from '@/lib/text';
 
-async function call(route: string, body?: unknown) {
-  const response = await fetch('/api/' + route, {
-    cache: 'no-store',
-    ...(body === undefined
-      ? {}
-      : {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '本机服务请求失败。');
-  return data;
-}
 const emptyRoles: AgentRequest['roles'] = {
   planner: '',
   analyst: '',
@@ -68,6 +56,12 @@ export default function AgentWorkbench() {
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState('');
+  const [pollError, setPollError] = useState('');
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(''), 6000);
+    return () => clearTimeout(timer);
+  }, [notice]);
   const [newView, setNewView] = useState(false),
     [refresh, setRefresh] = useState(0),
     [archived, setArchived] = useState<JobSummary[]>([]);
@@ -157,30 +151,49 @@ export default function AgentWorkbench() {
   }, [goal, phase, context, relay, budget]);
   useEffect(() => {
     let cancelled = false;
+    let controller = new AbortController();
+    let inFlight = false;
     const seq = ++sequence.current;
     let timer: ReturnType<typeof setTimeout>;
     async function load() {
+      if (cancelled || document.hidden || inFlight) return;
+      inFlight = true;
+      controller = new AbortController();
       try {
-        const [list, bin] = await Promise.all([call('agent/jobs'), call('agent/archived')]);
+        const [list, bin] = await Promise.all([
+          call('agent/jobs', undefined, controller.signal),
+          call('agent/archived', undefined, controller.signal),
+        ]);
         if (cancelled || seq !== sequence.current) return;
         setJobs(list);
         setArchived(bin);
         const selected = newView ? '' : id || list[0]?.id;
         if (selected) {
-          const detail = await call('agent/jobs/' + selected);
+          const detail = await call('agent/jobs/' + selected, undefined, controller.signal);
           if (!cancelled && seq === sequence.current) setJob(detail);
         } else setJob(null);
+        setPollError('');
       } catch (e) {
-        if (!cancelled) setError((e as Error).message);
+        if (!cancelled && !controller.signal.aborted) setPollError((e as Error).message);
       } finally {
+        inFlight = false;
         // Start the next poll only after this list/detail cycle finishes.
-        if (!cancelled) timer = setTimeout(load, job?.state === 'running' ? 1500 : 8000);
+        if (!cancelled && !document.hidden)
+          timer = setTimeout(load, job?.state === 'running' ? 1500 : 8000);
       }
     }
+    const visible = () => {
+      clearTimeout(timer);
+      if (document.hidden) controller.abort();
+      else void load();
+    };
+    document.addEventListener('visibilitychange', visible);
     load();
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      controller.abort();
+      document.removeEventListener('visibilitychange', visible);
     };
   }, [id, job?.state, newView, refresh]);
   const available = connections.filter((c) => c.enabled && c.configured),
@@ -226,20 +239,19 @@ export default function AgentWorkbench() {
   }
   function downloadBrief() {
     if (!job) return;
-    const url = URL.createObjectURL(
+    downloadBlob(
       new Blob([agentRelayBrief(job)], { type: 'text/markdown;charset=utf-8' }),
+      '共桌执行简报-' + job.id.slice(0, 8) + '.md',
     );
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = '共桌执行简报-' + job.id.slice(0, 8) + '.md';
-    a.click();
-    URL.revokeObjectURL(url);
   }
   async function start() {
     setBusy(true);
     setError('');
     try {
-      key.current ??= crypto.randomUUID();
+      key.current ??= retryKey(
+        'cg-retry-agent',
+        JSON.stringify({ goal, phase, context, roles, budget }),
+      );
       const created = await call('agent/jobs', {
         idempotencyKey: key.current,
         goal,
@@ -249,6 +261,7 @@ export default function AgentWorkbench() {
         budget: budget ? Number(budget) : null,
       });
       key.current = null;
+      clearRetryKey('cg-retry-agent');
       setNewView(false);
       setId(created.id);
       setJob(created);
@@ -298,14 +311,10 @@ export default function AgentWorkbench() {
       budget: budget ? Number(budget) : null,
       files: [],
     };
-    const url = URL.createObjectURL(
+    downloadBlob(
       new Blob([JSON.stringify(input, null, 2)], { type: 'application/json' }),
+      'common-ground-request.json',
     );
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'common-ground-request.json';
-    a.click();
-    URL.revokeObjectURL(url);
     setNotice('已下载请求配置。执行 Agent 可填充 files，使用命令行自动提交和等待结果。');
   }
   function newCollaboration() {
@@ -325,7 +334,11 @@ export default function AgentWorkbench() {
     setPhase('plan');
     setCopyFallback('');
     setError('');
-    setNotice('已新建空白协作，模型分工保留。');
+    setNotice(
+      jobs.some((j) => j.state === 'running')
+        ? '已新建空白协作；后台运行仍在继续，可从协作记录找回。'
+        : '已新建空白协作，模型分工保留。',
+    );
   }
   async function manageJob(jobId: string, operation: 'archive' | 'restore') {
     if (
@@ -421,10 +434,14 @@ export default function AgentWorkbench() {
               </li>
             ))}
           </ol>
-          {error && (
+          {(error || pollError) && (
             <div className="ag-alert ag-error" role="alert">
-              <span>{error}</span>
-              <button onClick={() => setError('')} aria-label="关闭错误" title="关闭错误">
+              <span>{error || pollError}</span>
+              <button
+                onClick={() => (error ? setError('') : setPollError(''))}
+                aria-label="关闭错误"
+                title="关闭错误"
+              >
                 <X size={17} />
               </button>
             </div>
@@ -433,6 +450,24 @@ export default function AgentWorkbench() {
             <p className="ag-alert" role="status">
               {notice}
             </p>
+          )}
+          {jobs.some((j) => j.state === 'running' && j.id !== job?.id) && (
+            <div className="ag-alert">
+              <span>后台仍有协作运行。</span>
+              {jobs
+                .filter((j) => j.state === 'running' && j.id !== job?.id)
+                .map((j) => (
+                  <button
+                    key={j.id}
+                    onClick={() => {
+                      setId(j.id);
+                      setNewView(false);
+                    }}
+                  >
+                    查看：{j.goal.slice(0, 32)}
+                  </button>
+                ))}
+            </div>
           )}
           {copyFallback && (
             <label className="ag-copy-fallback">
@@ -763,9 +798,9 @@ export default function AgentWorkbench() {
                   移到回收站
                 </button>
                 <p className="ag-muted">
-                  {job.id} · {new Date(job.createdAt).toLocaleString('zh-CN')}
+                  {job.id} · {exportDate(job.createdAt)}
                 </p>
-                <div className="ag-pipeline" aria-label="协作步骤">
+                <div className="ag-pipeline" role="group" aria-label="协作步骤">
                   {job.steps.map((s) => (
                     <details key={s.role}>
                       <summary>

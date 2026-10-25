@@ -12,7 +12,6 @@ import {
   Download,
   Pencil,
   Save,
-  Link2,
   History,
   Settings2,
   MessageSquare,
@@ -28,6 +27,7 @@ import {
   CheckCheck,
   Layers,
   ArrowUpRight,
+  RotateCw,
 } from 'lucide-react';
 import type { Task, Block, Finding, PublicConnection, ReviewSpec } from '@/lib/types';
 import {
@@ -41,15 +41,16 @@ import {
   draftImportError,
 } from '@/lib/presentation';
 import { seed } from '@/lib/seed';
-import { firstSentence, findingStateNames } from '@/lib/text';
 import ConnectionEditor from './connection-editor';
 import { documentInputBudget } from '@/lib/document-input';
 import { date } from './workbench/format';
-import { Sheet, Highlight, JsonBlock, Diff } from './workbench/shared';
+import { Sheet, Highlight } from './workbench/shared';
+import { AuditRecord } from './workbench/audit-record';
 import { MaterialsDrawer } from './workbench/materials-drawer';
 import { VersionsDrawer } from './workbench/versions-drawer';
 import { DiscussionDrawer } from './workbench/discussion-drawer';
 import { ReviewControls, AssessmentPanel } from './workbench/review-controls';
+import { FindingCard } from './workbench/finding-card';
 import {
   defaultReviewSpec,
   ReviewSpecSchema,
@@ -58,9 +59,14 @@ import {
   reconcileReviewBlocks,
 } from '@/lib/review-scope';
 import { MAX_BLOCK_CHARACTERS, MAX_DOCUMENT_CHARACTERS } from '@/lib/limits';
+import { api, localFetch, responseJSON, downloadBlob } from '@/lib/client-api';
+import { readLocal, writeLocal, retryKey, clearRetryKey } from '@/lib/browser-storage';
+import { taskCache } from '@/lib/task-cache';
+import type { TaskSummary } from '@/lib/workspace-summary';
+import type { TaskContent } from '@/lib/task-views';
 
 type Workspace = {
-  tasks: Task[];
+  tasks: TaskSummary[];
   connections: PublicConnection[];
   archivedTasks: { id: string; title: string }[];
 };
@@ -78,29 +84,6 @@ type Drawer =
   | 'sample'
   | null;
 type Method = 'S0' | 'S1' | 'S5';
-const stateNames = findingStateNames;
-async function api(path: string, body?: unknown) {
-  const r = await fetch('/api/' + path, {
-    cache: 'no-store',
-    ...(body !== undefined
-      ? {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      : {}),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || '请求失败，请重试。');
-  return data;
-}
-function readLocal(key: string) {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
 export default function SimpleWorkbench() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null),
     [taskId, setTaskId] = useState(''),
@@ -109,6 +92,15 @@ export default function SimpleWorkbench() {
     [notice, setNotice] = useState(''),
     [busy, setBusy] = useState(false),
     [offline, setOffline] = useState(false);
+  const [pollError, setPollError] = useState('');
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 960px)');
+    const update = () => setNarrow(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
   const [drawer, setDrawer] = useState<Drawer>(null),
     [sourceId, setSourceId] = useState<string | null>(null),
     [versionId, setVersionId] = useState(''),
@@ -154,13 +146,25 @@ export default function SimpleWorkbench() {
   );
   const submission = useRef<{ signature: string; id: string } | null>(null),
     discussionSubmission = useRef<{ signature: string; id: string } | null>(null);
+  const focusAfterDetail = useRef(false);
   const [pendingDiscussion, setPendingDiscussion] = useState<{
     taskId: string;
     runId: string;
     text: string;
   } | null>(null);
   const [replaceId, setReplaceId] = useState(''),
-    [detailTask, setDetailTask] = useState<Task | null>(null);
+    [detailTask, setDetailTask] = useState<TaskContent | null>(null);
+  const [contentCache] = useState(taskCache);
+  const [historyTask, setHistoryTask] = useState<TaskContent | null>(null);
+  const [historyError, setHistoryError] = useState('');
+  const [historyRetry, setHistoryRetry] = useState(0);
+  const [detailRequest, setDetailRequest] = useState<{
+    taskId: string;
+    updatedAt: string;
+    status: 'loading' | 'error' | 'ready';
+    error: string;
+  } | null>(null);
+  const [detailRetry, setDetailRetry] = useState(0);
   useEffect(() => {
     const view = new URLSearchParams(window.location.search).get('view');
     if (view === 'materials' || view === 'versions') {
@@ -182,33 +186,86 @@ export default function SimpleWorkbench() {
     drawerFocus = useRef<HTMLElement | null>(null),
     positions = useRef({ document: 0, suggestions: 0 });
   const listTask = workspace?.tasks.find((t) => t.id === taskId) ?? workspace?.tasks[0];
-  const task =
-    detailTask?.id === listTask?.id &&
-    detailTask?.updatedAt === listTask?.updatedAt &&
-    ['versions', 'activity'].includes(drawer || '')
-      ? detailTask
-      : listTask;
+  const task = detailTask?.id === listTask?.id ? detailTask : undefined;
+  const detailStatus =
+    detailRequest?.taskId === listTask?.id && detailRequest?.updatedAt === listTask?.updatedAt
+      ? detailRequest?.status
+      : 'loading';
+  const detailError = detailStatus === 'error' ? detailRequest?.error : '';
+  const taskReady = detailStatus === 'ready' && !!task && task.updatedAt === listTask?.updatedAt;
+  const inputBusy = busy || !taskReady;
   useEffect(() => {
-    if (!listTask || !['versions', 'activity'].includes(drawer || '')) return;
+    if (!taskReady || !focusAfterDetail.current) return;
+    focusAfterDetail.current = false;
+    document.getElementById('current-document')?.focus({ preventScroll: true });
+  }, [taskReady, task?.id]);
+  useEffect(() => {
+    if (!listTask) return;
     let cancelled = false;
-    api('task-detail?taskId=' + encodeURIComponent(listTask.id))
+    const controller = new AbortController();
+    const request = { taskId: listTask.id, updatedAt: listTask.updatedAt };
+    setDetailRequest({ ...request, status: 'loading', error: '' });
+    const cached = contentCache.get(listTask.id, listTask.updatedAt, 'main');
+    (cached
+      ? Promise.resolve(cached)
+      : api(
+          'task-detail?view=main&taskId=' + encodeURIComponent(listTask.id),
+          undefined,
+          controller.signal,
+        )
+    )
       .then((t) => {
-        if (!cancelled) setDetailTask(t);
+        if (!cancelled) {
+          contentCache.put(t);
+          setDetailTask(t);
+          setDetailRequest({ ...request, status: 'ready', error: '' });
+        }
       })
-      .catch((e) => setError(e.message));
+      .catch((e) => {
+        if (!cancelled) setDetailRequest({ ...request, status: 'error', error: e.message });
+      });
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [drawer, listTask?.id, listTask?.updatedAt]);
+  }, [listTask?.id, listTask?.updatedAt, detailRetry]);
+  const needsHistory = !!drawer && ['versions', 'materials', 'discussion'].includes(drawer);
+  const historyReady = historyTask?.id === task?.id && historyTask?.updatedAt === task?.updatedAt;
   useEffect(() => {
-    if (!['versions', 'activity'].includes(drawer || '')) setDetailTask(null);
-  }, [drawer]);
+    if (!needsHistory || !taskReady || !task) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    setHistoryError('');
+    const cached = contentCache.get(task.id, task.updatedAt, 'history');
+    (cached
+      ? Promise.resolve(cached)
+      : api(
+          'task-detail?view=history&taskId=' + encodeURIComponent(task.id),
+          undefined,
+          controller.signal,
+        )
+    )
+      .then((value) => {
+        if (!cancelled) {
+          contentCache.put(value);
+          setHistoryTask(value);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setHistoryError(e.message);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [needsHistory, task?.id, task?.updatedAt, taskReady, historyRetry]);
+  const drawerTask = drawer === 'activity' ? task : historyReady ? historyTask : undefined;
   const revision = task?.revisions.find((r) => r.id === task.currentRevision);
   const reviewError = task && scopedReview ? reviewSpecError(reviewSpec, task) : '';
   const active = task?.runs.find((r) => r.state === 'running'),
     latest = task?.runs.at(-1);
   const finding = task?.findings.find((f) => f.id === selected),
-    source = task?.sources.find((s) => s.id === sourceId);
+    source = (drawerTask || task)?.sources.find((s) => s.id === sourceId);
   const dirty = useMemo(
     () =>
       editing &&
@@ -225,17 +282,22 @@ export default function SimpleWorkbench() {
       (f) => f.stale && !f.supersededBy && (f.status === 'pending' || f.status === 'deferred'),
     ).length ?? 0;
   const completedCalls =
+    // Billing remains available in summary records as well as full detail.
     task?.runs
       .filter((r) => r.mode === 'live')
       .flatMap((r) => r.steps)
       .filter((s) => s.sent) ?? [];
+  const visibleFindings = useMemo(
+    () => filteredFindings(task?.findings ?? [], filter),
+    [task?.findings, filter],
+  );
   const knownCost = completedCalls.reduce((total, s) => total + (s.cost ?? 0), 0);
   const acceptedCount = task?.findings.filter((f) => f.status === 'accepted').length ?? 0;
   const showWelcome =
     workspace &&
-    (!task ||
+    (!listTask ||
       (!started &&
-        workspace.tasks.every((t) => t.example && !t.runs.length && t.revisions.length === 1)));
+        workspace.tasks.every((t) => t.example && !t.runs.length && t.revisionCount === 1)));
   useEffect(() => {
     const node = document.querySelector('.cg-checkbar');
     if (!node) return;
@@ -250,11 +312,16 @@ export default function SimpleWorkbench() {
     observer.observe(node);
     return () => observer.disconnect();
   }, [task?.id, showWelcome]);
+  const loadController = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
     const seq = ++loadSeq.current;
     try {
-      const response = await fetch('/api/workspace?view=summary', {
+      const response = await localFetch('/api/workspace?view=summary', {
         cache: 'no-store',
+        signal: controller.signal,
         headers: workspaceTag.current ? { 'If-None-Match': workspaceTag.current } : {},
       });
       if (seq !== loadSeq.current) return;
@@ -262,12 +329,12 @@ export default function SimpleWorkbench() {
         setOffline(false);
         return;
       }
-      if (!response.ok) throw new Error('无法读取工作区。');
-      const data = (await response.json()) as Workspace;
+      const data = (await responseJSON(response)) as Workspace;
       if (seq !== loadSeq.current) return;
       workspaceTag.current = response.headers.get('etag') || '';
       setWorkspace(data);
       setOffline(false);
+      setPollError('');
       setTaskId((id) => {
         const preferred = id || readLocal('cg-task');
         return data.tasks.some((t) => t.id === preferred) ? preferred! : data.tasks[0]?.id || '';
@@ -276,30 +343,33 @@ export default function SimpleWorkbench() {
         (old) =>
           old ||
           readLocal('cg-started') === 'true' ||
-          data.tasks.some((t) => !t.example || t.runs.length > 0 || t.revisions.length > 1),
+          data.tasks.some((t) => !t.example || t.runs.length > 0 || t.revisionCount > 1),
       );
     } catch (e) {
-      if (seq !== loadSeq.current) return;
+      if (seq !== loadSeq.current || controller.signal.aborted) return;
       setOffline(true);
-      setError((e as Error).message);
+      setPollError((e as Error).message);
     }
   }, []);
   useEffect(() => {
-    load();
-  }, [load]);
-  useEffect(() => {
-    const timer = setInterval(
-      () => {
-        if (!document.hidden) load();
-      },
-      active ? 1800 : 8000,
-    );
-    const visible = () => {
-      if (!document.hidden) load();
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (cancelled || document.hidden) return;
+      await load();
+      if (!cancelled && !document.hidden) timer = setTimeout(poll, active ? 1800 : 8000);
     };
+    const visible = () => {
+      clearTimeout(timer);
+      if (!document.hidden) void poll();
+      else loadController.current?.abort();
+    };
+    void poll();
     document.addEventListener('visibilitychange', visible);
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      clearTimeout(timer);
+      loadController.current?.abort();
       document.removeEventListener('visibilitychange', visible);
     };
   }, [load, !!active]);
@@ -324,7 +394,7 @@ export default function SimpleWorkbench() {
     } catch {}
     const spec = reconcileReviewBlocks(
       savedReview?.success ? savedReview.data : defaultReviewSpec(),
-      task.revisions.find((r) => r.id === task.currentRevision)!.blocks,
+      task.revisions.find((r) => r.id === task.currentRevision)?.blocks ?? [],
     );
     setReviewConfig(spec);
     setReviewSelection(spec.criteria.map((c) => c.id));
@@ -332,6 +402,10 @@ export default function SimpleWorkbench() {
     setSelected(null);
     setFilter('pending');
     setEditing(false);
+    setBudget('');
+    setSelfCheck(true);
+    setContext('continue');
+    setQuestion('');
     setHasDraft(!!readLocal('cg-draft-' + task.id));
     try {
       const saved = JSON.parse(readLocal('cg-draft-' + task.id) || 'null');
@@ -351,27 +425,32 @@ export default function SimpleWorkbench() {
   useEffect(() => {
     if (!task || !revision || selectionTask.current !== task.id) return;
     setReviewConfig((previous) => {
-      const next = reconcileReviewBlocks(previous, revision.blocks);
-      if (next !== previous) {
-        try {
-          localStorage.setItem('cg-review-' + task.id, JSON.stringify(next));
-        } catch {}
-      }
-      return next;
+      return reconcileReviewBlocks(previous, revision.blocks);
     });
   }, [task?.id, revision?.id]);
+  useEffect(() => {
+    if (!task || selectionTask.current !== task.id) return;
+    const timer = setTimeout(() => {
+      if (!writeLocal('cg-review-' + task.id, JSON.stringify(reviewConfig)))
+        setError('审查设置暂存失败，请保持页面打开。');
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [task?.id, reviewConfig]);
   function persistDraft() {
     if (!editing || !dirty || !task || draftTask !== task.id) return true;
     try {
-      localStorage.setItem(
-        'cg-draft-' + task.id,
-        JSON.stringify({
-          blocks: draft,
-          constraint: draftConstraint,
-          base: draftBase,
-          savedAt: new Date().toISOString(),
-        }),
-      );
+      if (
+        !writeLocal(
+          'cg-draft-' + task.id,
+          JSON.stringify({
+            blocks: draft,
+            constraint: draftConstraint,
+            base: draftBase,
+            savedAt: new Date().toISOString(),
+          }),
+        )
+      )
+        throw new Error('draft storage failed');
       setDraftStatus('草稿已在本机暂存');
       setHasDraft(true);
       setDraftInfo(
@@ -435,8 +514,12 @@ export default function SimpleWorkbench() {
           (event instanceof KeyboardEvent
             ? event.key === 'Escape'
             : !ref.current.contains(event.target as Node))
-        )
-          ref.current.open = false;
+        ) {
+          const menu = ref.current;
+          const focusInside = menu.contains(document.activeElement);
+          menu.open = false;
+          if (event instanceof KeyboardEvent || focusInside) menu.querySelector('summary')?.focus();
+        }
       }
     };
     document.addEventListener('pointerdown', close);
@@ -466,6 +549,11 @@ export default function SimpleWorkbench() {
       localStorage.setItem('cg-started', 'true');
     } catch {}
   }
+  function focusDocument() {
+    requestAnimationFrame(() =>
+      document.getElementById('current-document')?.focus({ preventScroll: true }),
+    );
+  }
   function chooseMethod(next: Method) {
     setMethod(next);
     if (next === 'S5') setContext('continue');
@@ -487,8 +575,9 @@ export default function SimpleWorkbench() {
   }
   function open(d: Drawer) {
     const active = document.activeElement as HTMLElement | null;
-    drawerFocus.current =
-      (active?.closest('details')?.querySelector('summary') as HTMLElement | null) ?? active;
+    if (!active?.closest('dialog'))
+      drawerFocus.current =
+        (active?.closest('details')?.querySelector('summary') as HTMLElement | null) ?? active;
     if (moreMenu.current) moreMenu.current.open = false;
     if (projectMenu.current) projectMenu.current.open = false;
     setDrawer(d);
@@ -516,10 +605,6 @@ export default function SimpleWorkbench() {
     } else open('sample');
   }
   function switchTask(id: string) {
-    if (editing && dirty && draftStatus.startsWith('暂存失败')) {
-      setError('草稿暂存失败，请先保存或复制内容再切换项目。');
-      return;
-    }
     if (!persistDraft()) {
       setError('草稿暂存失败，请先保存或复制内容再切换项目。');
       return;
@@ -530,13 +615,18 @@ export default function SimpleWorkbench() {
     setSourceId(null);
     setDrawer(null);
     setDetailTask(null);
+    if (id === listTask?.id) {
+      contentCache.clear();
+      setDetailRetry((attempt) => attempt + 1);
+    }
     setVersionId('');
     setMobile('document');
+    focusAfterDetail.current = true;
     begin();
     if (projectMenu.current) projectMenu.current.open = false;
   }
   function edit() {
-    if (!task || !revision) return;
+    if (!task || !revision || !taskReady) return;
     let old;
     try {
       old = JSON.parse(readLocal('cg-draft-' + task.id) || 'null');
@@ -551,7 +641,7 @@ export default function SimpleWorkbench() {
       setDraftConstraint(old.constraint);
       setDraftBase(old.base);
       if (old.base !== revision.id)
-        setNotice('恢复的是旧版草稿。请复制重要内容；保存时会检查版本，不能覆盖新稿。');
+        setNotice('已恢复旧版草稿。核对后可另存新版本，当前版本仍会保留。');
     } else {
       setDraft(structuredClone(revision.blocks));
       setDraftConstraint(revision.constraint);
@@ -562,13 +652,22 @@ export default function SimpleWorkbench() {
     setEditing(true);
     setMobile('document');
   }
-  async function save() {
-    if (!task || !revision) return;
+  async function save(recover = false) {
+    if (!task || !revision || !taskReady) return;
+    if (
+      draftBase !== revision.id &&
+      (!recover ||
+        !window.confirm(
+          '将完整旧草稿另存为新版本？当前版本与历史都会保留；新版本的正文和约束将使用这份草稿。',
+        ))
+    )
+      return;
     const ok = await action(
       () =>
         api('save', {
           taskId: task.id,
-          base: draftBase,
+          base: recover ? revision.id : draftBase,
+          ...(recover ? { recoveryFrom: draftBase } : {}),
           blocks: draft,
           constraint: draftConstraint,
         }),
@@ -580,10 +679,11 @@ export default function SimpleWorkbench() {
       } catch {}
       setEditing(false);
       setHasDraft(false);
+      focusDocument();
     }
   }
   async function start() {
-    if (!task) return;
+    if (!task || !taskReady) return;
     if (dirty) {
       setError('请先保存正文草稿，再开始检查。');
       return;
@@ -613,12 +713,13 @@ export default function SimpleWorkbench() {
       ...(scopedReview ? { reviewSpec } : {}),
     };
     const signature = JSON.stringify(payload);
-    if (submission.current?.signature !== signature)
-      submission.current = { signature, id: crypto.randomUUID() };
-    const idempotencyKey = submission.current.id;
     const ok = await action(async () => {
+      if (submission.current?.signature !== signature)
+        submission.current = { signature, id: retryKey('cg-retry-run-' + task.id, signature) };
+      const idempotencyKey = submission.current.id;
       await api('runs', { ...payload, idempotencyKey });
       submission.current = null;
+      clearRetryKey('cg-retry-run-' + task.id);
     });
     if (ok) {
       begin();
@@ -626,10 +727,13 @@ export default function SimpleWorkbench() {
       switchMobile('suggestions');
       setSelected(null);
       if (methodMenu.current) methodMenu.current.open = false;
+      requestAnimationFrame(() =>
+        document.getElementById('suggestions-panel')?.focus({ preventScroll: true }),
+      );
     }
   }
   async function decide(f: Finding, decision: 'accepted' | 'rejected' | 'deferred' | 'pending') {
-    if (!task || !revision) return;
+    if (!task || !revision || !taskReady) return;
     if (dirty) {
       setError('请先保存正文草稿，再处理修改建议。');
       return;
@@ -641,10 +745,16 @@ export default function SimpleWorkbench() {
     if (
       ok &&
       (decision === 'accepted' || !filteredFindings([{ ...f, status: decision }], filter).length)
-    )
+    ) {
       setSelected(null);
+      focusDocument();
+    }
   }
   async function create() {
+    if (!persistDraft()) {
+      setError('草稿暂存失败，请先保存后新建项目。');
+      return;
+    }
     const ok = await action(async () => {
       const t = await api('task', { title, goal, content, constraint });
       setEditing(false);
@@ -680,16 +790,16 @@ export default function SimpleWorkbench() {
     }
   }
   async function upload(file: File) {
-    if (!task) return;
+    if (!task || !taskReady) return;
     const ok = await action(
       async () => {
         const form = new FormData();
         form.set('taskId', task.id);
         form.set('file', file);
         if (replaceId) form.set('replaceId', replaceId);
-        const r = await fetch('/api/material', { method: 'POST', body: form });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error);
+        const data = await responseJSON(
+          await localFetch('/api/material', { method: 'POST', body: form }),
+        );
         setSourceId(data.id);
       },
       replaceId ? '材料已更新，旧引用保留。' : '材料已导入。',
@@ -698,7 +808,7 @@ export default function SimpleWorkbench() {
     if (fileInput.current) fileInput.current.value = '';
   }
   async function send() {
-    if (!task || !question.trim()) return;
+    if (!task || !taskReady || !question.trim()) return;
     if (dirty) {
       setError('请先保存正文草稿，再继续讨论。');
       return;
@@ -711,32 +821,32 @@ export default function SimpleWorkbench() {
         text: sentText,
       },
       signature = JSON.stringify(payload);
-    if (discussionSubmission.current?.signature !== signature)
-      discussionSubmission.current = { signature, id: crypto.randomUUID() };
-    const idempotencyKey = discussionSubmission.current.id;
     await action(async () => {
+      if (discussionSubmission.current?.signature !== signature)
+        discussionSubmission.current = {
+          signature,
+          id: retryKey('cg-retry-message-' + task.id, signature),
+        };
+      const idempotencyKey = discussionSubmission.current.id;
       const run = await api('message', { ...payload, idempotencyKey });
       discussionSubmission.current = null;
+      clearRetryKey('cg-retry-message-' + task.id);
       setPendingDiscussion({ taskId: task.id, runId: run.id, text: sentText });
     });
   }
-  function download() {
-    if (!task || !revision) return;
-    const a = document.createElement('a');
-    a.href = `/api/export?taskId=${encodeURIComponent(task.id)}&revision=${encodeURIComponent(revision.id)}&format=${format}&review=${includeReview}`;
-    a.download = `共桌-${task.title}.${format}`;
-    a.click();
-    setNotice('已请求导出当前保存版本。');
-    setDrawer(null);
+  async function download() {
+    if (!task || !revision || !taskReady) return;
+    const ok = await action(async () => {
+      const response = await localFetch(
+        `/api/export?taskId=${encodeURIComponent(task.id)}&revision=${encodeURIComponent(revision.id)}&format=${format}&review=${includeReview}`,
+      );
+      if (!response.ok) await responseJSON(response);
+      downloadBlob(await response.blob(), `共桌-${task.title}.${format}`);
+    }, '导出文件已生成。');
+    if (ok) setDrawer(null);
   }
   function changeReviewConfig(spec: ReviewSpec) {
     setReviewConfig(spec);
-    if (!task) return;
-    try {
-      localStorage.setItem('cg-review-' + task.id, JSON.stringify(spec));
-    } catch {
-      setError('审查设置暂存失败，请保持页面打开。');
-    }
   }
   function switchMobile(next: 'document' | 'suggestions') {
     positions.current[mobile] = window.scrollY;
@@ -755,7 +865,7 @@ export default function SimpleWorkbench() {
   }
   const runMode = task ? (task.example ? (modeTask === task.id ? mode : 'demo') : 'live') : 'live',
     calls = runMode === 'demo' ? 0 : callCount(method, selfCheck),
-    methodInfo = checkMethods.find((m) => m.id === method)!;
+    methodInfo = checkMethods.find((m) => m.id === method) ?? checkMethods[0];
   const recommended = task && workspace ? recommendation(task, workspace.connections) : null;
   const chosenIds = method === 'S0' ? [primary] : [primary, secondary];
   useEffect(() => {
@@ -768,7 +878,7 @@ export default function SimpleWorkbench() {
       setQuestion((q) => (q === pendingDiscussion.text ? '' : q));
     setPendingDiscussion(null);
   }, [workspace, pendingDiscussion, taskId]);
-  async function archiveProject(t: Task) {
+  async function archiveProject(t: Pick<Task, 'id' | 'title' | 'currentRevision'>) {
     if (!persistDraft()) {
       setError('草稿暂存失败，请先保存后再管理项目。');
       return;
@@ -813,6 +923,11 @@ export default function SimpleWorkbench() {
 
   const needsMaterials = method === 'S5' && !task?.sources.length;
 
+  const sourceSignature = task?.sources.map((s) => `${s.id}:${s.version}`).join('|');
+  const messageSignature = task?.messages
+    .slice(-10)
+    .map((m) => m.id)
+    .join('|');
   const inputBudget = useMemo(
     () =>
       task && revision
@@ -826,7 +941,18 @@ export default function SimpleWorkbench() {
             ...(scopedReview ? { reviewSpec } : {}),
           })
         : null,
-    [task, revision, context, method, selfCheck, scopedReview, reviewSpec],
+    [
+      task?.id,
+      task?.currentRevision,
+      task?.goal,
+      sourceSignature,
+      messageSignature,
+      context,
+      method,
+      selfCheck,
+      scopedReview,
+      reviewSpec,
+    ],
   );
   const inputBytes = inputBudget?.bytes ?? 0,
     inputLimit = inputBudget?.limit ?? 100000;
@@ -836,7 +962,7 @@ export default function SimpleWorkbench() {
       draftLength > MAX_DOCUMENT_CHARACTERS ||
       draft.some((b) => b.content.length > MAX_BLOCK_CHARACTERS);
   const runBlocked =
-    busy ||
+    inputBusy ||
     !!active ||
     !!dirty ||
     !!reviewError ||
@@ -854,16 +980,52 @@ export default function SimpleWorkbench() {
     export: '导出方案',
     sample: '示例方案',
   };
+  const detailFeedback = (
+    <section aria-label="项目详情状态">
+      <h2>{detailError ? '项目详情加载失败' : '正在加载项目详情'}</h2>
+      <p role={detailError ? 'alert' : 'status'}>{detailError || '正在读取文稿与历史记录。'}</p>
+      {detailError && (
+        <button
+          className="cg-secondary"
+          onClick={() => {
+            contentCache.clear();
+            setDetailRetry((attempt) => attempt + 1);
+          }}
+        >
+          <RotateCw size={16} />
+          重试加载详情
+        </button>
+      )}
+      {!task && (
+        <div aria-hidden="true" data-detail-skeleton="true">
+          {[75, 100, 90].map((width) => (
+            <div
+              key={width}
+              style={{
+                width: `${width}%`,
+                height: 18,
+                marginTop: 16,
+                background: 'var(--border)',
+                borderRadius: 'var(--radius-sm)',
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
 
   return (
-    <div className="cg-app" ref={appRoot} role="region" aria-label="文稿工作空间">
+    <div className="cg-app" ref={appRoot}>
       <div className="cg-header" role="region" aria-label="项目工具栏">
         <span className="cg-breadcrumb">
           文稿项目 <span>/</span>
         </span>
         <details className="cg-project-picker" ref={projectMenu}>
-          <summary aria-label={'切换项目：' + (!showWelcome && task ? task.title : '选择项目')}>
-            <span>{!showWelcome && task ? task.title : '选择项目'}</span>
+          <summary
+            aria-label={'切换项目：' + (!showWelcome && listTask ? listTask.title : '选择项目')}
+          >
+            <span>{!showWelcome && listTask ? listTask.title : '选择项目'}</span>
             <ChevronDown size={16} />
           </summary>
           <div className="cg-menu">
@@ -901,7 +1063,7 @@ export default function SimpleWorkbench() {
               setSourceId(null);
               open('materials');
             }}
-            disabled={!task || !!showWelcome}
+            disabled={!taskReady || !!showWelcome}
           >
             <BookOpen size={16} />
             <span>材料</span>
@@ -912,7 +1074,7 @@ export default function SimpleWorkbench() {
             aria-label="版本"
             title="版本"
             onClick={() => open('versions')}
-            disabled={!task || !!showWelcome}
+            disabled={!taskReady || !!showWelcome}
           >
             <History size={16} />
             <span>版本</span>
@@ -922,7 +1084,7 @@ export default function SimpleWorkbench() {
             aria-label="讨论"
             title="讨论"
             onClick={() => open('discussion')}
-            disabled={!task || !!showWelcome}
+            disabled={!taskReady || !!showWelcome}
           >
             <MessageSquare size={16} />
             <span>讨论</span>
@@ -948,7 +1110,7 @@ export default function SimpleWorkbench() {
                   key={key}
                   onClick={() => open(key)}
                   disabled={
-                    (!task || !!showWelcome) && !['projects', 'settings', 'help'].includes(key)
+                    (!taskReady || !!showWelcome) && !['projects', 'settings', 'help'].includes(key)
                   }
                 >
                   <Icon size={16} />
@@ -962,7 +1124,7 @@ export default function SimpleWorkbench() {
       {!workspace ? (
         <main className="cg-loading" id="main-content" tabIndex={-1}>
           <Loader2 className="spin" />
-          正在打开共桌{error && <button onClick={load}>重新连接</button>}
+          正在打开共桌{pollError && <button onClick={load}>重新连接</button>}
         </main>
       ) : showWelcome ? (
         <main className="cg-welcome" id="main-content" tabIndex={-1}>
@@ -1020,10 +1182,16 @@ export default function SimpleWorkbench() {
             </section>
           </div>
         </main>
+      ) : !task || !revision ? (
+        <main className="cg-overview" id="main-content" tabIndex={-1}>
+          <h1>{listTask?.title}</h1>
+          {detailFeedback}
+        </main>
       ) : (
         task &&
         revision && (
           <>
+            {!taskReady && <div className="cg-overview">{detailFeedback}</div>}
             <section className="cg-overview" aria-label="项目概览">
               <div className="cg-overview-heading">
                 <div>
@@ -1478,7 +1646,7 @@ export default function SimpleWorkbench() {
               task={task}
               spec={reviewConfig}
               selectedIds={reviewSelection}
-              disabled={!!active || busy}
+              disabled={!!active || inputBusy}
               enabled={scopedReview}
               onChange={changeReviewConfig}
               onSelect={setReviewSelection}
@@ -1487,6 +1655,8 @@ export default function SimpleWorkbench() {
               <section
                 className="cg-document"
                 id="current-document"
+                role={narrow ? 'tabpanel' : undefined}
+                aria-labelledby={narrow ? 'document-tab' : undefined}
                 tabIndex={-1}
                 aria-label="当前方案"
               >
@@ -1506,7 +1676,10 @@ export default function SimpleWorkbench() {
                         <button
                           className="cg-text-button"
                           onClick={() => {
-                            persistDraft();
+                            if (!persistDraft()) {
+                              setError('草稿暂存失败，请保持编辑并保存，或复制内容。');
+                              return;
+                            }
                             setEditing(false);
                             setNotice(dirty ? '草稿已保留，可继续编辑。' : '已退出编辑。');
                           }}
@@ -1515,15 +1688,15 @@ export default function SimpleWorkbench() {
                         </button>
                         <button
                           className="cg-primary"
-                          onClick={save}
-                          disabled={busy || !dirty || draftTooLong}
+                          onClick={() => save(draftBase !== revision.id)}
+                          disabled={inputBusy || !dirty || draftTooLong}
                         >
                           <Save size={15} />
-                          保存
+                          {draftBase !== revision.id ? '草稿另存新版本' : '保存'}
                         </button>
                       </>
                     ) : (
-                      <button className="cg-text-button" onClick={edit}>
+                      <button className="cg-text-button" disabled={inputBusy} onClick={edit}>
                         <Pencil size={15} />
                         编辑
                       </button>
@@ -1620,7 +1793,7 @@ export default function SimpleWorkbench() {
                             <button
                               className="cg-text-button"
                               title="将此段设为审查范围"
-                              disabled={!!active || busy}
+                              disabled={!!active || inputBusy}
                               onClick={() => {
                                 changeReviewConfig({
                                   ...reviewConfig,
@@ -1666,7 +1839,7 @@ export default function SimpleWorkbench() {
                           <>
                             <textarea
                               aria-label={'编辑 ' + (b.title || '段落 ' + (i + 1))}
-                              rows={Math.max(4, Math.ceil(b.content.length / 38))}
+                              rows={Math.min(20, Math.max(4, Math.ceil(b.content.length / 38)))}
                               value={b.content}
                               onChange={(e) =>
                                 setDraft((old) =>
@@ -1764,7 +1937,14 @@ export default function SimpleWorkbench() {
                   修改由你决定 · 保存、采纳和恢复都会保留版本
                 </footer>
               </section>
-              <aside id="suggestions-panel" className="cg-results" aria-label="检查结果与修改建议">
+              <aside
+                id="suggestions-panel"
+                className="cg-results"
+                role={narrow ? 'tabpanel' : undefined}
+                aria-labelledby={narrow ? 'suggestions-tab' : undefined}
+                tabIndex={-1}
+                aria-label="检查结果与修改建议"
+              >
                 <header>
                   <h2>
                     修改建议{' '}
@@ -1792,7 +1972,7 @@ export default function SimpleWorkbench() {
                     task={task}
                     mode={runMode}
                     spec={reviewSpec}
-                    disabled={!!active || busy || dirty}
+                    disabled={!!active || inputBusy || dirty}
                     onPrepare={(spec) => {
                       const prepared = prepareCriterionReview(reviewConfig, spec);
                       if (!prepared) {
@@ -1873,113 +2053,35 @@ export default function SimpleWorkbench() {
                       </p>
                     </div>
                   )}
-                  {filteredFindings(task.findings, filter).map((f) => {
+                  {visibleFindings.map((f) => {
                     const reason = staleReason(task, f),
                       isOpen = selected === f.id;
                     return (
-                      <section
-                        className={'cg-finding ' + (isOpen ? 'open' : '')}
+                      <FindingCard
                         key={f.id}
-                        id={'card-' + f.id}
-                      >
-                        <h3>
-                          <button
-                            className="cg-finding-summary"
-                            aria-expanded={isOpen}
-                            aria-controls={'finding-' + f.id}
-                            aria-labelledby={'title-' + f.id}
-                            onClick={() => {
-                              setSelected(isOpen ? null : f.id);
-                              if (!isOpen)
-                                requestAnimationFrame(() => {
-                                  const scroll = document.querySelector('.cg-results-scroll');
-                                  const card = document.getElementById('card-' + f.id);
-                                  if (scroll && card)
-                                    scroll.scrollTop +=
-                                      card.getBoundingClientRect().top -
-                                      scroll.getBoundingClientRect().top;
-                                  if (window.matchMedia('(min-width:961px)').matches)
-                                    showBlock(f, false);
-                                });
-                            }}
-                          >
-                            <span className={'cg-priority ' + f.severity}>
-                              {f.severity === 'high'
-                                ? '优先处理'
-                                : f.severity === 'medium'
-                                  ? '建议检查'
-                                  : '可选改进'}
-                            </span>
-                            <span className="cg-finding-title" id={'title-' + f.id}>
-                              {f.title}
-                            </span>
-                            <span className="cg-finding-reason">{firstSentence(f.reason)}</span>
-                            {(f.stale || f.status !== 'pending') && (
-                              <small>
-                                {f.supersededBy
-                                  ? '已由新审查替代'
-                                  : f.stale
-                                    ? '已过期 · 需重查'
-                                    : stateNames[f.status]}
-                              </small>
-                            )}
-                            <ChevronDown size={16} />
-                          </button>
-                        </h3>
-                        {isOpen && (
-                          <div className="cg-finding-body" id={'finding-' + f.id}>
-                            <button className="cg-text-button" onClick={() => showBlock(f)}>
-                              在方案中查看
-                            </button>
-                            {f.status !== 'accepted' && reason && (
-                              <div className="cg-alert warning">{reason}</div>
-                            )}
-                            <Diff before={f.before} after={f.after} />
-                            <h4>为什么修改</h4>
-                            <p>{f.reason}</p>
-                            <details className="cg-evidence">
-                              <summary>
-                                <span>
-                                  <BookOpen size={14} />
-                                  材料依据
-                                </span>
-                                <small>
-                                  {
-                                    {
-                                      supports: '材料支持',
-                                      contradicts: '材料矛盾',
-                                      insufficient: '依据不足',
-                                    }[f.relation]
-                                  }
-                                </small>
-                                <ChevronDown size={14} />
-                              </summary>
-                              {f.quote ? (
-                                <blockquote>{f.quote}</blockquote>
-                              ) : (
-                                <p>未提供原始引用，需要人工核对。</p>
-                              )}
-                              <p className="cg-citation-status">
-                                <Link2 size={13} />
-                                {f.quoteValid ? '引用可定位' : '引用尚未定位'}
-                                {f.sourceId && (
-                                  <button
-                                    onClick={() => {
-                                      setSourceId(f.sourceId);
-                                      open('materials');
-                                    }}
-                                  >
-                                    查看原文
-                                  </button>
-                                )}
-                              </p>
-                              <small>
-                                引用可定位仅指找到原句，不表示事实已经验证；支持关系仍需核对。
-                              </small>
-                            </details>
-                          </div>
-                        )}
-                      </section>
+                        finding={f}
+                        open={isOpen}
+                        reason={reason}
+                        onToggle={() => {
+                          setSelected(isOpen ? null : f.id);
+                          if (!isOpen)
+                            requestAnimationFrame(() => {
+                              const scroll = document.querySelector('.cg-results-scroll');
+                              const card = document.getElementById('card-' + f.id);
+                              if (scroll && card)
+                                scroll.scrollTop +=
+                                  card.getBoundingClientRect().top -
+                                  scroll.getBoundingClientRect().top;
+                              if (window.matchMedia('(min-width:961px)').matches)
+                                showBlock(f, false);
+                            });
+                        }}
+                        onShowBlock={() => showBlock(f)}
+                        onViewSource={() => {
+                          setSourceId(f.sourceId);
+                          open('materials');
+                        }}
+                      />
                     );
                   })}
                   {filter === 'stale' && !!staleCount && (
@@ -1991,78 +2093,80 @@ export default function SimpleWorkbench() {
                       </button>
                     </div>
                   )}
-                  {!!task.findings.length && !filteredFindings(task.findings, filter).length && (
+                  {!!task.findings.length && !visibleFindings.length && (
                     <p className="cg-empty-note">
                       这个分类暂无建议。可以切换到“全部记录”回看已处理内容。
                     </p>
                   )}
                 </div>
-                {finding &&
-                  filteredFindings(task.findings, filter).some((f) => f.id === finding.id) && (
-                    <footer className="cg-result-actions" aria-label="建议操作">
-                      <small>{finding.title}</small>
-                      {dirty && <p>编辑中，请保存后再处理建议。</p>}
-                      {finding.status !== 'accepted' && staleReason(task, finding) && (
-                        <p>{staleReason(task, finding)}</p>
-                      )}
-                      {finding.status === 'accepted' ? (
-                        <div className="cg-accepted">
-                          已接受，保存为 v
-                          {task.revisions.find((r) => r.id === finding.appliedRevision)?.number ??
-                            '?'}
-                          ，原版本保留。
-                        </div>
-                      ) : (
-                        <>
+                {finding && visibleFindings.some((f) => f.id === finding.id) && (
+                  <footer className="cg-result-actions" role="group" aria-label="建议操作">
+                    <small>{finding.title}</small>
+                    {dirty && <p>编辑中，请保存后再处理建议。</p>}
+                    {finding.status !== 'accepted' && staleReason(task, finding) && (
+                      <p>{staleReason(task, finding)}</p>
+                    )}
+                    {finding.status === 'accepted' ? (
+                      <div className="cg-accepted">
+                        已接受，保存为 v
+                        {task.revisions.find((r) => r.id === finding.appliedRevision)?.number ??
+                          '?'}
+                        ，原版本保留。
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          className="cg-primary cg-accept"
+                          onClick={() => decide(finding, 'accepted')}
+                          disabled={
+                            inputBusy ||
+                            !!staleReason(task, finding) ||
+                            finding.status === 'rejected' ||
+                            !!dirty
+                          }
+                        >
+                          接受修改
+                        </button>
+                        <div className="cg-decisions">
                           <button
-                            className="cg-primary cg-accept"
-                            onClick={() => decide(finding, 'accepted')}
-                            disabled={
-                              busy ||
-                              !!staleReason(task, finding) ||
-                              finding.status === 'rejected' ||
-                              !!dirty
+                            onClick={() =>
+                              decide(
+                                finding,
+                                finding.status === 'deferred' || finding.status === 'rejected'
+                                  ? 'pending'
+                                  : 'deferred',
+                              )
                             }
+                            disabled={inputBusy || !!dirty}
                           >
-                            接受修改
+                            {finding.status === 'deferred' || finding.status === 'rejected'
+                              ? '恢复待处理'
+                              : '暂缓'}
                           </button>
-                          <div className="cg-decisions">
-                            <button
-                              onClick={() =>
-                                decide(
-                                  finding,
-                                  finding.status === 'deferred' || finding.status === 'rejected'
-                                    ? 'pending'
-                                    : 'deferred',
-                                )
-                              }
-                              disabled={busy || !!dirty}
-                            >
-                              {finding.status === 'deferred' || finding.status === 'rejected'
-                                ? '恢复待处理'
-                                : '暂缓'}
-                            </button>
-                            <button
-                              onClick={() => decide(finding, 'rejected')}
-                              disabled={busy || !!dirty || finding.status === 'rejected'}
-                            >
-                              拒绝
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </footer>
-                  )}
+                          <button
+                            onClick={() => decide(finding, 'rejected')}
+                            disabled={inputBusy || !!dirty || finding.status === 'rejected'}
+                          >
+                            拒绝
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </footer>
+                )}
               </aside>
             </main>
           </>
         )
       )}
-      {error && !drawer && (
+      {(error || pollError) && !drawer && (
         <div className="cg-error" role="alert">
           <AlertCircle size={18} />
-          <span>{error}</span>
-          <button aria-label="关闭错误提示" onClick={() => setError('')}>
+          <span>{error || pollError}</span>
+          <button
+            aria-label="关闭错误提示"
+            onClick={() => (error ? setError('') : setPollError(''))}
+          >
             <X size={18} />
           </button>
         </div>
@@ -2106,6 +2210,7 @@ export default function SimpleWorkbench() {
       <Sheet
         open={!!drawer}
         title={drawer ? titles[drawer] : ''}
+        focusKey={`${drawer}:${drawer === 'materials' ? sourceId : ''}`}
         onClose={() => setDrawer(null)}
         returnFocus={drawerFocus.current}
         wide={drawer === 'settings'}
@@ -2118,6 +2223,29 @@ export default function SimpleWorkbench() {
             </button>
           </div>
         )}
+        {!taskReady &&
+          listTask &&
+          drawer &&
+          !['projects', 'settings', 'help', 'new', 'sample'].includes(drawer) &&
+          detailFeedback}
+        {needsHistory &&
+          taskReady &&
+          !historyReady &&
+          (historyError ? (
+            <p role="alert">
+              {historyError}
+              <button
+                onClick={() => {
+                  contentCache.clear();
+                  setHistoryRetry((n) => n + 1);
+                }}
+              >
+                重试读取历史
+              </button>
+            </p>
+          ) : (
+            <p role="status">正在读取项目历史…</p>
+          ))}
         {drawer === 'new' && (
           <form
             className="cg-form"
@@ -2263,10 +2391,10 @@ export default function SimpleWorkbench() {
           </div>
         )}
         {drawer === 'settings' && <ConnectionEditor embedded onSaved={load} />}
-        {drawer === 'materials' && task && (
+        {drawer === 'materials' && drawerTask && (
           <MaterialsDrawer
-            task={task}
-            busy={busy}
+            task={drawerTask}
+            busy={inputBusy}
             source={source}
             finding={finding}
             setSourceId={setSourceId}
@@ -2295,19 +2423,19 @@ export default function SimpleWorkbench() {
               附带问题、引用与处理记录
             </label>
             <p className="cg-muted">不包含模型密钥、私有参数和完整讨论。未解决分歧可保留在附录。</p>
-            <button className="cg-primary" disabled={!!dirty} onClick={download}>
+            <button className="cg-primary" disabled={inputBusy || !!dirty} onClick={download}>
               <Download size={16} />
               导出文件
             </button>
           </div>
         )}
-        {drawer === 'versions' && task && revision && (
+        {drawer === 'versions' && drawerTask && task && revision && (
           <VersionsDrawer
-            task={task}
+            task={drawerTask}
             revision={revision}
             versionId={versionId}
             setVersionId={setVersionId}
-            busy={busy}
+            busy={inputBusy}
             dirty={dirty}
             onRestore={(id) =>
               action(
@@ -2318,11 +2446,11 @@ export default function SimpleWorkbench() {
             onActivity={() => open('activity')}
           />
         )}
-        {drawer === 'activity' && task && (
+        {drawer === 'activity' && drawerTask && task && (
           <>
             <p>实际输入、输出、失败与费用均保留；未知费用请与供应商账单核对。</p>
             {!task.runs.length && <p className="cg-muted">还没有调用记录。</p>}
-            {task.runs
+            {drawerTask.runs
               .slice()
               .reverse()
               .map((r) => (
@@ -2340,7 +2468,7 @@ export default function SimpleWorkbench() {
                   </p>
                   {r.steps.map((s) => (
                     <section key={s.id}>
-                      <h4>{s.label}</h4>
+                      <h3>{s.label}</h3>
                       <p>
                         {s.status} · {s.connectionSnapshot?.label || '旧记录：连接名称未记录'} ·{' '}
                         {s.connectionSnapshot?.model || s.model || '模型未知／未调用'} ·{' '}
@@ -2351,9 +2479,9 @@ export default function SimpleWorkbench() {
                       </p>
                       {s.error && <div className="cg-alert error">{s.error}</div>}
                       {s.result && <p>{s.result}</p>}
-                      <JsonBlock value={s} />
                     </section>
                   ))}
+                  <AuditRecord taskId={task.id} runId={r.id} updatedAt={task.updatedAt} />
                 </details>
               ))}
           </>
@@ -2383,12 +2511,12 @@ export default function SimpleWorkbench() {
             ))}
           </>
         )}
-        {drawer === 'discussion' && task && (
+        {drawer === 'discussion' && drawerTask && task && (
           <DiscussionDrawer
-            task={task}
+            task={drawerTask}
             active={active}
             latest={latest}
-            busy={busy}
+            busy={busy || (!taskReady && !active)}
             available={available}
             receiver={receiver}
             question={question}

@@ -89,7 +89,7 @@ codex mcp add common_ground -- node 'C:\path\to\CommonGround\scripts\agent-mcp.m
 }
 ```
 
-files 相对于请求配置所在目录解析，只读取该目录及其子目录内显式列出的 UTF-8 文本文件；拒绝父目录、越界绝对路径、符号链接逃逸及 `.env*`、`.data`、常见密钥文件。请求文件本身和单个上下文文件不超过 100 KB。不会扫描整个项目或执行命令。请求配置与 context 内联文本仍由调用方审查；这些限制不是执行 Agent 的操作系统沙盒，不能阻止其通过其他工具读取文件。
+files 相对于请求配置所在目录解析，只读取该目录及其子目录内显式列出的 UTF-8 文本文件；拒绝父目录、越界绝对路径、符号链接逃逸和 NTFS 备用数据流。敏感名过滤是一份**不完整的黑名单**，目前覆盖 `.env*`、`.data`、`.git`、`.gitconfig`、`.ssh`、`.gnupg`、`.aws`、`.azure`、`.kube`、`.docker`、`.config`、`.m2`、`.gradle`、`.terraform.d`、`.terraformrc`、`credentials.tfrc.json`、`*.tfstate`、`.npmrc`、`.pypirc`、`.netrc`、`.git-credentials`、`.vault-token`、`.s3cfg`、`.databrickscfg`、`.my.cnf`、`gcloud`、`application_default_credentials.json`、`service-account*.json`、`logins.json`、`key*.db`、`cert*.db`、`cookies.sqlite`、`Cookies`、`Login Data`、`Local State`、`Web Data`、`id_rsa`/`id_ecdsa`/`id_ed25519`、`*.pem`/`*.key`/`*.crt`/`*.p12`/`*.pfx` 等。它只覆盖已知位置与文件名：改名、换目录或不在名单内的文件仍可能被读取；项目里名为 `gcloud` 的目录也会被一并拒绝，这是有意的取舍。请求文件本身和单个上下文文件不超过 100 KB。不会扫描整个项目或执行命令。请求配置与 context 内联文本仍由调用方审查；这些限制不是执行 Agent 的操作系统沙盒，不能阻止其通过其他工具读取文件。
 
 ```powershell
 node scripts/agent-bridge.mjs connections
@@ -118,7 +118,7 @@ run 会提交、等待并输出 JSON；--out 相对于请求文件所在目录�
 
 ## 费用、数据与验证范围
 
-CLI 读入的请求文件和 `files` 项均必须是无硬链接的普通 UTF-8 文件；验证后通过同一文件句柄最多读取 100 KB。目录边界与敏感文件名拦截并非操作系统沙箱：不能保证抵御有同机目录改写权限的程序，不能识别任意改名后的私有内容，也不能限制执行 Agent 的其他工具。
+CLI 读入的请求文件和 `files` 项均必须是无硬链接的普通 UTF-8 文件；验证后通过同一文件句柄最多读取 100 KB。目录边界与敏感文件名拦截并非操作系统沙箱：不能保证抵御有同机目录改写权限的程序，不能识别任意改名后的私有内容，也不能限制执行 Agent 的其他工具。具体而言，不在上述名单内或改名后的凭据（例如 `*.env` 的副本、自定义命名的 token 文件、`~/.vscode` 或 `%APPDATA%\Code\User` 等工具配置目录），以及把请求文件放在用户主目录、`%APPDATA%` 等父目录后用子路径引用，仍可能被读取；不要据此宣称“已保护本机敏感文件”。
 
 设置 budget 后，全部连接必须填写 USD/百万 token 单价。每步发请求前按保守字节上界和输出上限预留费用；已知实际用量时结算，未知用量保留预留。不填 budget 不设本次金额上限。此限制不能替代供应商账户硬限额。失败、取消和中断请求仍可能计费。
 

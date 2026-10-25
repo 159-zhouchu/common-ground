@@ -1,10 +1,10 @@
-import { test } from 'node:test';
+import { test, mock as testMock } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 process.env.CG_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-runner-'));
 const {
   readStore,
@@ -25,6 +25,7 @@ const requests: Record<string, unknown>[] = [];
 let delay = 0,
   reportUsage = true,
   fail = false,
+  failAfterPrior = false,
   outputSize = 0;
 let scopeFault: 'none' | 'outside' | 'missing' | 'fake' | 'finding' = 'none';
 const mock = http.createServer(async (req, res) => {
@@ -33,7 +34,7 @@ const mock = http.createServer(async (req, res) => {
   const body = JSON.parse(raw);
   const m = JSON.parse(body.input[0].content).input;
   requests.push(m);
-  if (fail) {
+  if (fail || (failAfterPrior && m.priorOutputs?.length)) {
     res.writeHead(500);
     res.end('{}');
     return;
@@ -103,10 +104,10 @@ const mock = http.createServer(async (req, res) => {
 });
 await new Promise<void>((resolve) => mock.listen(0, '127.0.0.1', resolve));
 const addr = mock.address() as { port: number };
-function fresh() {
+function fresh(example = false) {
   const t = seed().tasks[0];
   t.id = randomUUID();
-  t.example = false;
+  t.example = example;
   transact((s) => s.tasks.push(t));
   return t;
 }
@@ -140,6 +141,112 @@ test('runner integration', async (t) => {
   });
   readStore();
   configure();
+  await t.test(
+    'S1 keeps workspace commits within eleven and shares manifests in a 1 MiB store',
+    async () => {
+      const task = fresh();
+      const archived = structuredClone(task);
+      archived.id = randomUUID();
+      archived.revisions = Array.from({ length: 10 }, (_, i) => ({
+        ...archived.revisions[0],
+        id: 'scale-' + i,
+        blocks: [{ ...archived.revisions[0].blocks[0], content: 'x'.repeat(100000) }],
+      }));
+      archived.currentRevision = archived.revisions[0].id;
+      transact((s) => (s.archivedTasks ??= []).push(archived));
+      const file = path.join(process.env.CG_DATA_DIR!, 'workspace.json');
+      assert.ok(fs.statSync(file).size >= 1000000);
+      const rename = fs.renameSync;
+      let commits = 0;
+      const stub = testMock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+        if (String(to) === file) commits++;
+        return rename(from, to);
+      });
+      try {
+        const id = randomUUID();
+        startRun(
+          task.id,
+          {
+            strategy: 'S1',
+            selfCheck: false,
+            mode: 'live',
+            contextMode: 'continue',
+            slot: 'a',
+            budget: null,
+          },
+          id,
+        );
+        const run = await finished(task.id, id);
+        assert.equal(run.state, 'succeeded');
+        assert.ok(commits <= 11, `workspace commits: ${commits}`);
+        assert.equal(Object.keys(run.inputManifests || {}).length, 1);
+        assert.ok(run.steps.every((s) => !s.manifest && s.manifestKey));
+      } finally {
+        stub.mock.restore();
+        transact((s) => {
+          s.archivedTasks = s.archivedTasks?.filter((x) => x.id !== archived.id);
+        });
+      }
+    },
+  );
+  await t.test(
+    'sequential partial preserves assessments and supersedes only reviewed findings; failed S1 comparison keeps candidates separate',
+    async () => {
+      const { defaultReviewSpec, assessmentRows } = await import('../lib/review-scope');
+      const { stepManifest } = await import('../lib/run-audit');
+      const task = fresh();
+      const spec = defaultReviewSpec();
+      spec.mode = 'blocks';
+      spec.blockIds = [task.revisions[0].blocks[0].id];
+      spec.criteria.push({ id: 'budget', title: '预算', standard: '合计正确' });
+      const options = {
+        strategy: 'S0' as const,
+        selfCheck: false,
+        mode: 'live' as const,
+        contextMode: 'continue' as const,
+        slot: 'a' as const,
+        budget: null,
+        reviewSpec: spec,
+      };
+      scopeFault = 'finding';
+      try {
+        const firstId = randomUUID();
+        startRun(task.id, options, firstId);
+        assert.equal((await finished(task.id, firstId)).state, 'succeeded');
+        const oldFinding = getTask(task.id).findings[0];
+        failAfterPrior = true;
+        const partialId = randomUUID();
+        startRun(task.id, { ...options, selfCheck: true }, partialId);
+        const partial = await finished(task.id, partialId);
+        assert.equal(partial.state, 'partial');
+        assert.equal(partial.assessments?.length, 2);
+        assert.equal(assessmentRows(getTask(task.id)).length, 2);
+        assert.equal(
+          getTask(task.id).findings.find((f) => f.id === oldFinding.id)?.supersededBy,
+          partialId,
+        );
+        assert.equal(partial.findings.length, 1);
+        assert.equal(Object.keys(partial.inputManifests || {}).length, 1);
+        assert.ok(partial.steps.every((s) => !s.manifest && s.manifestKey));
+        assert.equal(stepManifest(partial, partial.steps[1])?.priorOutputs?.length, 1);
+        const comparisonId = randomUUID();
+        startRun(task.id, { ...options, strategy: 'S1' }, comparisonId);
+        const comparison = await finished(task.id, comparisonId);
+        assert.equal(comparison.state, 'partial');
+        assert.equal(comparison.assessments, undefined);
+        assert.equal(comparison.findings.length, 0);
+        assert.match(comparison.summary, /比较未完成/);
+        assert.ok(comparison.steps.slice(0, 2).every((s) => s.output?.assessments?.length === 2));
+        assert.equal(
+          getTask(task.id).findings.find((f) => f.runId === partialId)?.supersededBy,
+          undefined,
+        );
+      } finally {
+        scopeFault = 'none';
+        failAfterPrior = false;
+      }
+    },
+  );
   await t.test('定向三种策略完整携带范围，复查单项保留其他结论；越界与缺项失败', async () => {
     const { defaultReviewSpec, assessmentRows } = await import('../lib/review-scope');
     const task = fresh(),
@@ -201,6 +308,9 @@ test('runner integration', async (t) => {
         assert.equal(bad.state, 'failed');
         assert.equal(bad.assessments, undefined);
         assert.equal(bad.steps[0].sent, true);
+        assert.ok(bad.steps[0].diagnostic);
+        assert.equal(bad.steps[0].cost, 0.000213);
+        assert.equal(bad.steps[0].requestId, 'mock-local-request');
         assert.equal(assessmentRows(getTask(task.id)).length, 2);
       } finally {
         scopeFault = 'none';
@@ -263,6 +373,42 @@ test('runner integration', async (t) => {
     assert.ok((requests[2].blocks as unknown[]).length > 0);
     assert.ok(r.steps.every((s) => s.inputHash && s.usage?.input === 123));
     assert.equal(r.steps[0].cost, 0.000213);
+  });
+  await t.test('旧 baseRevision 指纹仅在参数完全相同时兼容重放', async () => {
+    const task = fresh(true),
+      id = randomUUID();
+    const opts = {
+      strategy: 'S0' as const,
+      contextMode: 'continue' as const,
+      selfCheck: false,
+      mode: 'demo' as const,
+      slot: 'a' as const,
+      budget: null,
+    };
+    const run = startRun(task.id, opts, id);
+    const legacy = createHash('sha256')
+      .update(
+        JSON.stringify({
+          strategy: opts.strategy,
+          selfCheck: opts.selfCheck,
+          mode: opts.mode,
+          contextMode: opts.contextMode,
+          slot: opts.slot,
+          compareRole: 'a',
+          budget: opts.budget,
+          baseRevision: null,
+          roles: null,
+          reviewSpec: null,
+          discussionQuestion: null,
+        }),
+      )
+      .digest('hex');
+    transact((s) => {
+      s.tasks.find((t) => t.id === task.id)!.runs.find((r) => r.id === id)!.requestFingerprint =
+        legacy;
+    });
+    assert.equal(startRun(task.id, opts, id).id, run.id);
+    assert.throws(() => startRun(task.id, { ...opts, selfCheck: true }, id), /请求标识/);
   });
   await t.test('停止后迟到调用不进入成果或讨论，调用记录仍然保留', async () => {
     delay = 120;

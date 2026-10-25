@@ -14,6 +14,8 @@
     "agent": "node scripts/agent-bridge.mjs",
     "agent:mcp": "node scripts/agent-mcp.mjs",
     "test:launcher": "node tests/launcher-smoke.mjs",
+    "test:detail": "node tests/detail-recovery.mjs",
+    "lint": "eslint app lib scripts tests --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"app/**/*.{ts,tsx}\" \"lib/**/*.ts\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.{json,ts}\"",
     "format:check": "prettier --check \"app/**/*.{ts,tsx}\" \"lib/**/*.ts\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.{json,ts}\""
@@ -30,12 +32,16 @@
     "zod": "^4.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "prettier": "3.8.1",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.72.0"
   },
   "engines": {
     "node": ">=22.9.0"

@@ -11,6 +11,8 @@ import {
   clearOwner,
   matches,
   delay,
+  processIdentity,
+  recordedProcessAlive,
 } from './launcher-state.mjs';
 import './check-node.mjs';
 import { acquireLauncherLock } from './launcher-lock.mjs';
@@ -33,7 +35,7 @@ async function main() {
       }
       throw new Error(`端口 ${port} 已被其他程序或另一工作区占用；未停止或修改该程序。`);
     }
-    if (old && alive(old.pid))
+    if (old && recordedProcessAlive(old))
       throw new Error('原启动进程仍存在但服务未就绪；请先停止原实例，启动记录已保留。');
     const next = path.resolve('node_modules/next/dist/bin/next'),
       instance = randomUUID(),
@@ -60,14 +62,19 @@ async function main() {
     let failure;
     server.on('error', (e) => (failure = e.message));
     server.unref();
-    const owner = { pid: server.pid, instance, port, token };
+    const owner = { pid: server.pid, instance, port, token, identity: processIdentity(server.pid) };
     try {
       if (server.pid) writeOwner(dir, owner);
       const deadline = Date.now() + 20000;
       while (Date.now() < deadline) {
         if (failure || server.exitCode !== null) break;
-        if (matches(owner, await health(port))) {
-          console.log('共桌已启动：' + url);
+        const readiness = await health(port);
+        if (matches(owner, readiness)) {
+          console.log(
+            readiness.ready === false
+              ? '共桌已启动，但部分本机存储不可用：' + url
+              : '共桌已启动：' + url,
+          );
           return;
         }
         await delay(200);

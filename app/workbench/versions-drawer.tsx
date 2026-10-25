@@ -26,15 +26,39 @@ export function VersionsDrawer({
     revision && (
       <>
         <p>恢复旧版会创建新版本，已有历史保留。</p>
-        <div className="cg-version-list">
+        <div className="cg-version-list" role="radiogroup" aria-label="选择预览版本">
           {task.revisions
             .slice()
             .reverse()
             .map((r) => (
               <button
                 key={r.id}
-                aria-pressed={(versionId || revision.id) === r.id}
+                role="radio"
+                aria-checked={(versionId || revision.id) === r.id}
+                tabIndex={(versionId || revision.id) === r.id ? 0 : -1}
                 onClick={() => setVersionId(r.id)}
+                onKeyDown={(event) => {
+                  const buttons = Array.from(
+                    event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>(
+                      '[role="radio"]',
+                    ),
+                  );
+                  const index = buttons.indexOf(event.currentTarget);
+                  const target =
+                    event.key === 'Home'
+                      ? 0
+                      : event.key === 'End'
+                        ? buttons.length - 1
+                        : ['ArrowRight', 'ArrowDown'].includes(event.key)
+                          ? (index + 1) % buttons.length
+                          : ['ArrowLeft', 'ArrowUp'].includes(event.key)
+                            ? (index + buttons.length - 1) % buttons.length
+                            : -1;
+                  if (target < 0) return;
+                  event.preventDefault();
+                  buttons[target].focus();
+                  buttons[target].click();
+                }}
               >
                 <b>
                   v{r.number}

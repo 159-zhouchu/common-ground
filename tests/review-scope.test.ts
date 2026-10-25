@@ -160,7 +160,7 @@ test('遗漏与重复验收项被拒绝；局部修改不能越界', () => {
     }),
   );
 });
-test('单项复查只替换同标准同范围结论，失败与部分完成保留此前结论', () => {
+test('单项复查与部分完成保留已取得结论，失败不替换；不同范围隔离', () => {
   const { task, spec, run } = setup();
   spec.criteria.push({ id: 'budget', title: '预算', standard: '合计正确' });
   run.assessments!.push({
@@ -183,7 +183,16 @@ test('单项复查只替换同标准同范围结论，失败与部分完成保�
     assessments: [{ ...recheck.assessments[0], verdict: 'insufficient' as const }],
   };
   task.runs.push(failed);
-  assert.ok(assessmentRows(task).every((r) => r.assessment.verdict === 'passed'));
+  assert.equal(
+    assessmentRows(task).find((r) => r.criterion.id === 'budget')?.assessment.verdict,
+    'insufficient',
+  );
+  assert.equal(
+    assessmentRows(task).find((r) => r.criterion.id === 'overall')?.assessment.verdict,
+    'passed',
+  );
+  task.runs.push({ ...recheck, id: 'failed-with-output', state: 'failed' });
+  assert.equal(assessmentRows(task).find((r) => r.criterion.id === 'budget')?.run.id, failed.id);
   const otherScope = structuredClone(recheck);
   otherScope.id = 'other';
   otherScope.reviewSpec!.mode = 'focus';
@@ -250,19 +259,34 @@ test('复查只将同范围同标准的旧建议移入历史，不改其他项�
     { id: 'c', criterionId: 'budget', runId: run.id, status: 'accepted', stale: false },
   ] as Task['findings'];
   const recheck = { ...run, id: 'new', reviewSpec: { ...spec, criteria: [spec.criteria[1]] } };
-  supersedeScopedFindings(task, { ...recheck, state: 'partial' });
+  supersedeScopedFindings(task, { ...recheck, state: 'partial', assessments: [] });
   assert.ok(task.findings.every((f) => !f.stale));
   supersedeScopedFindings(task, {
     ...recheck,
     reviewSpec: { ...recheck.reviewSpec, focus: '另一范围', mode: 'focus' },
   });
   assert.ok(task.findings.every((f) => !f.stale));
-  supersedeScopedFindings(task, recheck);
+  supersedeScopedFindings(task, {
+    ...recheck,
+    assessments: [{ ...run.assessments![0], criterionId: 'budget' }],
+  });
   assert.equal(task.findings[0].stale, false);
   assert.equal(task.findings[1].stale, true);
   assert.equal(task.findings[1].supersededBy, 'new');
   assert.equal(task.findings[1].status, 'deferred');
   assert.equal(task.findings[2].stale, false);
+});
+test('historical export preserves stale and partial labels without mutating current revision', () => {
+  const { task, run } = setup();
+  task.runs.push({ ...run, state: 'partial' });
+  const old = task.currentRevision;
+  appendRevision(task, structuredClone(task.revisions[0].blocks), '新约束', 'test', old);
+  const current = task.currentRevision;
+  const text = markdown(task, true, old);
+  assert.match(text, /版本 v1/);
+  assert.match(text, /待复核/);
+  assert.match(text, /部分完成/);
+  assert.equal(task.currentRevision, current);
 });
 test('定向审查设置计入预检字节且完整背景仍可见，含两路比较和前序余量', () => {
   const { task, spec } = setup();

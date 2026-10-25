@@ -1,4 +1,5 @@
 import { freePort, waitForInstance } from './local-server.mjs';
+import { writeReport } from './write-report.mjs';
 // Production-server integration in an isolated temporary workspace. No paid API calls.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -551,19 +552,51 @@ try {
   );
   for (const t of full.tasks) {
     const small = summary.tasks.find((x) => x.id === t.id);
-    assert.equal(small.revisions.length, t.revisions.length);
+    assert.equal(small.revisionCount, t.revisions.length);
+    assert.equal(small.runCount, t.runs.length);
+    assert.equal(small.findingCount, t.findings.length);
+    for (const key of [
+      'sources',
+      'revisions',
+      'findings',
+      'messages',
+      'goal',
+      'description',
+      'impacts',
+    ])
+      assert.equal(Object.hasOwn(small, key), false);
     assert.deepEqual(
-      small.revisions.find((r) => r.id === t.currentRevision).blocks,
-      t.revisions.find((r) => r.id === t.currentRevision).blocks,
-    );
-    assert.ok(
-      small.revisions.filter((r) => r.id !== t.currentRevision).every((r) => r.blocks.length === 0),
+      small.runs,
+      t.runs.map(({ id, state }) => ({ id, state })),
     );
   }
   const detail = await call('task-detail?taskId=' + sample.id);
   assert.equal(detail.revisions.length, 3);
   assert.ok(detail.revisions[0].blocks.length);
   checks.push('摘要保留版本元信息、ETag 返回 304、历史详情按需读取');
+  const mainView = await call('task-detail?view=main&taskId=' + sample.id);
+  assert.ok(
+    mainView.revisions
+      .filter((r) => r.id !== mainView.currentRevision)
+      .every((r) => !r.blocks.length),
+  );
+  assert.ok(
+    mainView.runs.every(
+      (r) => !r.inputManifests && r.steps.every((s) => !s.output && !s.manifest && !s.diagnostic),
+    ),
+  );
+  const historyView = await call('task-detail?view=history&taskId=' + sample.id);
+  assert.deepEqual(historyView.revisions, detail.revisions);
+  const auditView = await call(
+    'task-detail?view=audit&taskId=' + created.id + '&runId=' + discussion.id,
+  );
+  assert.deepEqual(auditView.run, historical);
+  await call(
+    'task-detail?view=audit&taskId=' + sample.id + '&runId=' + discussion.id,
+    undefined,
+    404,
+  );
+  checks.push('main 不含旧正文及审计；history 完整旧版本；audit 按项目和运行隔离');
   await call('task/rename', {
     taskId: created.id,
     title: '改名后的项目',
@@ -629,9 +662,9 @@ try {
   const scopedSummary = (await call('workspace?view=summary')).tasks.find(
     (t) => t.id === created.id,
   );
-  assert.equal(scopedSummary.runs.at(-1).assessments[0].verdict, 'passed');
-  assert.ok(!scopedSummary.runs.at(-1).steps[0].manifest);
-  checks.push('定向真实协议成功回传分项结论，轻量轮询保留范围与结论');
+  assert.equal(scopedSummary.runs.at(-1).state, 'succeeded');
+  assert.deepEqual(Object.keys(scopedSummary.runs.at(-1)).sort(), ['id', 'state']);
+  checks.push('定向真实协议成功回传分项结论，轻量轮询只保留运行状态，分项结论由详情读取');
   for (const format of ['md', 'docx']) {
     const exported = await fetch(
       base + `/api/export?taskId=${created.id}&review=true&format=${format}`,
@@ -647,6 +680,46 @@ try {
     assert.match(text, /通过/);
   }
   checks.push('Markdown 和 DOCX 导出保留分项验收标准、结论和版本');
+  const frozenBase = scopedTask.currentRevision;
+  const frozenBlocks = structuredClone(
+    scopedTask.revisions.find((r) => r.id === frozenBase).blocks,
+  );
+  const newRevision = await call('save', {
+    taskId: created.id,
+    base: frozenBase,
+    blocks: frozenBlocks,
+    constraint: '导出待复核回归',
+  });
+  for (const format of ['md', 'docx']) {
+    const response = await fetch(
+      base + `/api/export?taskId=${created.id}&revision=${frozenBase}&review=true&format=${format}`,
+    );
+    assert.equal(response.status, 200);
+    const text =
+      format === 'md'
+        ? await response.text()
+        : (await mammoth.extractRawText({ buffer: Buffer.from(await response.arrayBuffer()) }))
+            .value;
+    assert.match(text, /待复核/);
+  }
+  const beforeConflict = await call('task-detail?taskId=' + created.id);
+  await call(
+    'save',
+    { taskId: created.id, base: frozenBase, blocks: frozenBlocks, constraint: '' },
+    409,
+  );
+  assert.deepEqual(await call('task-detail?taskId=' + created.id), beforeConflict);
+  await call('save', {
+    taskId: created.id,
+    base: newRevision.id,
+    recoveryFrom: frozenBase,
+    blocks: frozenBlocks,
+    constraint: '旧稿恢复',
+  });
+  const recovered = await call('task-detail?taskId=' + created.id);
+  assert.ok(recovered.revisions.some((r) => r.id === newRevision.id));
+  assert.match(recovered.revisions.at(-1).reason, /旧草稿/);
+  checks.push('历史 MD/DOCX 导出保留待复核；旧草稿另存保留历史，过期保存无副作用');
   const callsBeforeGuards = probeRequests.length;
   const replay = await call('runs', { ...reviewPayload, idempotencyKey: scoped.id });
   assert.equal(replay.id, scoped.id);
@@ -690,14 +763,57 @@ try {
     assert.equal((await response.json()).code, 'INVALID_MULTIPART');
   }
   checks.push('畸形上传表单返回 400 而非内部错误');
+  const workspaceFile = path.join(dir, 'workspace.json');
+  const good = fs.readFileSync(workspaceFile, 'utf8');
+  fs.writeFileSync(workspaceFile, '{corrupt-test');
+  const unhealthy = await fetch(base + '/api/health');
+  assert.equal(unhealthy.status, 503);
+  const workspaceDiagnostic = await unhealthy.json();
+  assert.equal(workspaceDiagnostic.instance, instance);
+  assert.equal(workspaceDiagnostic.components.workspace.ready, false);
+  assert.equal(workspaceDiagnostic.components.connections.ready, true);
+  assert.equal((await call('settings')).length > 0, true);
+  await call('workspace', undefined, 503);
+  assert.equal(fs.readFileSync(workspaceFile, 'utf8'), '{corrupt-test');
+  fs.writeFileSync(workspaceFile, good);
+  assert.equal((await fetch(base + '/api/health')).status, 200);
+  checks.push('workspace 损坏单独归因；connections/settings 仍可用，原文件保留并可人工恢复');
+  for (const [name, component, endpoint] of [
+    ['connections.json', 'connections', 'settings'],
+    ['agent-jobs.json', 'agents', 'agent/jobs'],
+    ['connection-tests.json', 'connectionTests', 'settings'],
+  ]) {
+    const file = path.join(dir, name);
+    const original = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    for (const broken of ['{broken', '{}']) {
+      fs.writeFileSync(file, broken);
+      const response = await fetch(base + '/api/health');
+      const diagnostic = await response.json();
+      assert.equal(response.status, component === 'connectionTests' ? 200 : 503);
+      assert.equal(diagnostic.instance, instance);
+      assert.equal(diagnostic.components[component].ready, false);
+      if (component === 'connectionTests') {
+        const settings = await call(endpoint);
+        assert.ok(settings[0].testLogWarning);
+        await call('workspace?view=summary');
+      } else if (component === 'connections') await call(endpoint, undefined, 503);
+      else assert.equal((await fetch(base + '/api/agent/jobs')).status, 503);
+      assert.equal(fs.readFileSync(file, 'utf8'), broken);
+    }
+    if (original === null) fs.unlinkSync(file);
+    else fs.writeFileSync(file, original);
+    assert.equal((await fetch(base + '/api/health')).status, 200);
+  }
+  checks.push(
+    '连接/协作/测试日志的 JSON 与形状损坏均可诊断、保留原文件并可人工恢复；辅助日志不阻断主流程',
+  );
   const report = {
     at: new Date().toISOString(),
     scope: '本机生产构建的隔离 HTTP 集成测试；没有真实模型调用或用户效果评测',
     passed: checks.length,
     checks,
   };
-  fs.mkdirSync('docs/evidence', { recursive: true });
-  fs.writeFileSync('docs/evidence/http-checks.json', JSON.stringify(report, null, 2));
+  writeReport('http-checks.json', report);
   console.log(JSON.stringify(report, null, 2));
 } finally {
   mock.close();

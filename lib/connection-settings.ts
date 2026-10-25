@@ -1,11 +1,16 @@
 import { z } from 'zod';
 import { AppError } from './domain';
 import { validateConnection, modelRequest, invoke } from './models';
-import { connections, writeAtomic, saveConnections, publicConnections } from './store';
+import {
+  connections,
+  writeAtomic,
+  saveConnections,
+  publicConnections,
+  connectionTests,
+} from './store';
 import { lockConnections } from './execution';
 import { MAX_CONNECTIONS } from './limits';
 import type { Connection, Manifest, ConnectionTest } from './types';
-import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -73,10 +78,13 @@ const logFile = path.resolve(
 );
 type TestRecord = ConnectionTest;
 function recordTest(record: TestRecord) {
-  const old: TestRecord[] = fs.existsSync(logFile)
-    ? JSON.parse(fs.readFileSync(logFile, 'utf8'))
-    : [];
-  writeAtomic(logFile, [...old, record].slice(-50));
+  try {
+    const old = connectionTests();
+    writeAtomic(logFile, [...old, record].slice(-50));
+  } catch {
+    record.warning = '本次测试已完成，但测试日志未保存；请保留本次用量并检查数据恢复说明。';
+    console.warn({ code: 'TEST_LOG_UNAVAILABLE', file: 'connection-tests.json' });
+  }
 }
 
 export async function testConnection(input: z.infer<typeof ConnectionInput>) {

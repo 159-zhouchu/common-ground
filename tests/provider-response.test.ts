@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { invokeStructured, structuredRequest } from '../lib/models';
 import { AppError } from '../lib/domain';
 import type { Connection } from '../lib/types';
+import { ModelOutputError, MAX_DIAGNOSTIC_BYTES } from '../lib/model-diagnostic';
 
 const limit = 1024 * 1024;
 const output = { summary: '本机模拟正文' };
@@ -106,4 +107,47 @@ test('供应商响应在解析前限流并校验信封格式，不透传原文',
     response = new Response(JSON.stringify(envelope('responses')));
     assert.deepEqual((await invoke()).output, output);
   });
+  await t.test(
+    'Chat text parts are joined; invalid paid output retains bounded redacted diagnostics and billing',
+    async () => {
+      response = Response.json({
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: {
+              content: [
+                { type: 'text', text: '{"summary":' },
+                { type: 'text', text: '"parts"}' },
+              ],
+            },
+          },
+        ],
+      });
+      assert.deepEqual((await invoke('chat')).output, { summary: 'parts' });
+      response = new Response('null', { headers: { 'x-request-id': 'invalid-envelope' } });
+      await assert.rejects(invoke('chat'), (e: unknown) => {
+        assert.ok(e instanceof ModelOutputError);
+        assert.equal(e.audit.cost, null);
+        assert.equal(e.audit.requestId, 'invalid-envelope');
+        assert.equal(e.audit.diagnostic?.excerpt, 'null');
+        return true;
+      });
+      for (const content of [connection.apiKey + '中'.repeat(9000), '{"unexpected":true}']) {
+        response = Response.json({
+          choices: [{ finish_reason: 'stop', message: { content } }],
+          usage: { prompt_tokens: 100, completion_tokens: 50 },
+          id: 'paid-request',
+        });
+        await assert.rejects(invoke('chat'), (e: unknown) => {
+          assert.ok(e instanceof ModelOutputError);
+          assert.equal(e.audit.cost, 0.00015);
+          assert.equal(e.audit.requestId, 'paid-request');
+          assert.equal(e.audit.usage?.input, 100);
+          assert.ok(Buffer.byteLength(e.audit.diagnostic!.excerpt) <= MAX_DIAGNOSTIC_BYTES);
+          assert.ok(!JSON.stringify(e.audit).includes(connection.apiKey));
+          return true;
+        });
+      }
+    },
+  );
 });

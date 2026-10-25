@@ -1,16 +1,12 @@
 node_modules/
 .next/
 .data/
+.codex/
 .env*
 !.env.example
 *.tsbuildinfo
-qa/
-
-# Generated and local-only files
-.codex/
-desktop.ini
-Thumbs.db
-~$*
 *.log
 *.pid
+desktop.ini
+qa/
 docs/evidence/

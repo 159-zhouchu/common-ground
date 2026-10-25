@@ -147,7 +147,7 @@
 .cg-source-text p>span:last-child{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
 .cg-version-list{display:flex;gap:8px;overflow:auto;padding:8px 0 15px}
 .cg-version-list>button{text-align:left;min-width:140px;max-width:230px;flex-shrink:0;border:1px solid var(--border);border-radius:var(--radius);padding:13px}
-.cg-version-list>button[aria-pressed=true]{background:var(--accent-soft);border-color:var(--border-strong)}
+.cg-version-list>button[aria-checked=true]{background:var(--accent-soft);border-color:var(--border-strong)}
 .cg-version-list span,.cg-version-list small{display:block;font-size:var(--text-xs)}
 .cg-version-preview{margin:15px 0;padding:18px;border:1px solid var(--border);border-radius:var(--radius)}
 .cg-version-preview p{font-size:var(--text-base);margin:12px 0}
