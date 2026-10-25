@@ -4,7 +4,7 @@ import { MAX_JSON_BODY_BYTES, MAX_UPLOAD_BODY_BYTES } from '@/lib/limits';
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { Document, Packer, Paragraph, HeadingLevel, TextRun } from 'docx';
-import mammoth from 'mammoth';
+import { extractDocx } from '@/lib/docx-import';
 import {
   readStore,
   transact,
@@ -37,6 +37,7 @@ import { startRun, stopRun } from '@/lib/runner';
 import { now } from '@/lib/seed';
 import { draftSections, findingStateNames, exportDate, exportDisposition } from '@/lib/text';
 import type { Task, Block } from '@/lib/types';
+import { ReviewSpecSchema, assessmentRows, scopeNames, verdictNames } from '@/lib/review-scope';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 function error(e: unknown) {
@@ -124,12 +125,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
           new Paragraph({
             text: `v${rev.number} · ${exportDate(rev.createdAt)}${task.example ? ' · 合成示例' : ''}`,
           }),
-          new Paragraph({ text: '任务约束', heading: HeadingLevel.HEADING_1 }),
-          new Paragraph(rev.constraint),
         ];
-        for (const b of rev.blocks) {
+        if (rev.constraint.trim())
           children.push(
-            new Paragraph({ text: b.title || '段落', heading: HeadingLevel.HEADING_1 }),
+            new Paragraph({ text: '任务约束', heading: HeadingLevel.HEADING_1 }),
+            new Paragraph(rev.constraint),
+          );
+        for (const [i, b] of rev.blocks.entries()) {
+          children.push(
+            new Paragraph({ text: b.title || `第 ${i + 1} 段`, heading: HeadingLevel.HEADING_1 }),
           );
           for (const line of b.content.split('\n'))
             children.push(
@@ -141,6 +145,23 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
         }
         if (include) {
           children.push(
+            new Paragraph({ text: '分项审查记录', heading: HeadingLevel.HEADING_1 }),
+            new Paragraph('通过仅针对所列标准与当时版本。'),
+          );
+          for (const { run, criterion, assessment, staleReason } of assessmentRows(task)) {
+            children.push(
+              new Paragraph({ text: criterion.title, heading: HeadingLevel.HEADING_2 }),
+              new Paragraph(`验收标准：${criterion.standard}`),
+              new Paragraph(
+                `范围：${scopeNames[run.reviewSpec!.mode]}${run.reviewSpec!.focus ? ' · ' + run.reviewSpec!.focus : ''}；v${task.revisions.find((v) => v.id === run.baseRevision)?.number ?? '?'}；${verdictNames[assessment.verdict]}${staleReason ? ' · 待复核' : ''}${run.mode === 'demo' ? ' · 合成示例' : ''}`,
+              ),
+              new Paragraph(assessment.reason),
+            );
+            if (staleReason) children.push(new Paragraph(staleReason));
+            for (const e of assessment.evidence)
+              children.push(new Paragraph(`依据（${e.blockId || e.sourceId}）：${e.quote}`));
+          }
+          children.push(
             new Paragraph({ text: '问题与依据记录', heading: HeadingLevel.HEADING_1 }),
             new Paragraph('处理状态截至导出时，正文绑定上述版本。'),
           );
@@ -148,7 +169,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
             children.push(
               new Paragraph({ text: f.title, heading: HeadingLevel.HEADING_2 }),
               new Paragraph(
-                `${findingStateNames[f.status]}${f.stale ? ' · 需重审' : ''}：${f.reason}`,
+                `${findingStateNames[f.status]}${f.supersededBy ? ' · 已由新审查替代' : f.stale ? ' · 需重审' : ''}：${f.reason}`,
               ),
               new Paragraph(
                 `材料：${task.sources.find((s) => s.id === f.sourceId)?.name || '未定位'} v${f.sourceVersion ?? '?'}；原文：${f.quote || '未提供'}。采用建议不等于事实已验证。`,
@@ -184,9 +205,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
     const path = (await params).path.join('/');
     if (path === 'material') {
       const raw = await boundedBody(req, MAX_UPLOAD_BODY_BYTES);
-      const form = await new Response(raw, {
-        headers: { 'Content-Type': req.headers.get('content-type') || '' },
-      }).formData();
+      const contentType = req.headers.get('content-type') || '';
+      if (!/^multipart\/form-data\s*;/i.test(contentType))
+        throw new AppError('INVALID_MULTIPART', '请使用文件上传表单提交材料。');
+      let form: FormData;
+      try {
+        form = await new Response(raw, { headers: { 'Content-Type': contentType } }).formData();
+      } catch {
+        throw new AppError('INVALID_MULTIPART', '上传表单格式无效，请重新选择文件上传。');
+      }
       const taskId = idSchema.parse(form.get('taskId'));
       const f = form.get('file');
       if (!(f instanceof File) || f.size > 5 * 1024 * 1024)
@@ -196,10 +223,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
       let text = '',
         warning = '';
       if (ext === 'docx') {
-        const out = await mammoth.extractRawText({ buffer });
-        text = out.value;
+        const out = await extractDocx(buffer);
+        text = out.text;
         warning = '已提取正文与表格文本，不保留分页、版式、批注和图片；复杂表格请对照原件。';
-        if (out.messages.length) warning += ' 解析器返回提示，请检查提取结果。';
+        if (out.hasWarnings) warning += ' 解析器返回提示，请检查提取结果。';
       } else if (ext === 'txt' || ext === 'md') {
         try {
           text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
@@ -253,12 +280,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
       return NextResponse.json(source);
     }
     const raw = await boundedBody(req, MAX_JSON_BODY_BYTES);
-    let b;
+    let parsed: unknown;
     try {
-      b = JSON.parse(new TextDecoder().decode(raw));
+      parsed = JSON.parse(new TextDecoder().decode(raw));
     } catch {
       throw new AppError('INVALID_JSON', '请求格式不是有效的 JSON。');
     }
+    const b = z.record(z.string(), z.unknown()).parse(parsed);
     if (path === 'task') {
       const data = z
         .object({
@@ -385,11 +413,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
         .parse(b);
       return NextResponse.json(
         editTask(taskId, (t) => {
+          if (data.base !== t.currentRevision)
+            throw new AppError('REVISION_CONFLICT', '方案已更新，请刷新后再处理建议。', 409);
           if (data.decision === 'accepted') return applyFinding(t, data.id, data.base);
           const f = t.findings.find((f) => f.id === data.id);
           if (!f) throw new AppError('NOT_FOUND', '问题不存在', 404);
           if (f.status === 'accepted')
             throw new AppError('ALREADY_APPLIED', '已采用的修改请通过版本恢复撤回。', 409);
+          if (f.supersededBy && ['pending', 'deferred'].includes(data.decision))
+            throw new AppError('REVISION_CONFLICT', '此建议已由新审查替代，请查看最新结论。', 409);
           f.status = data.decision;
           return f;
         }),
@@ -433,10 +465,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
           roleAssignments: z.object({ a: idSchema, b: idSchema.optional() }).optional(),
           compareRole: z.enum(['a', 'b']).default('a'),
           budget: z.number().positive().max(100).nullable(),
+          reviewSpec: ReviewSpecSchema.optional(),
+          base: idSchema.optional(),
         })
         .parse(b);
       const key = z.uuid().parse(b.idempotencyKey);
-      return NextResponse.json(startRun(taskId, opts, key));
+      if (opts.reviewSpec && !opts.base)
+        throw new AppError('REVIEW_SCOPE', '定向审查需要指定成果版本。');
+      return NextResponse.json(startRun(taskId, { ...opts, baseRevision: opts.base }, key));
     }
     if (path === 'stop') {
       stopRun(taskId, idSchema.parse(b.runId));
@@ -445,18 +481,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
     if (path === 'message') {
       const text = z.string().trim().min(1).max(4000).parse(b.text),
         slot = z.enum(['a', 'b']).default('a').parse(b.slot),
-        key = z.uuid().parse(b.idempotencyKey);
-      const task = getTask(taskId);
-      if (task.runs.some((r) => r.id === key))
-        return NextResponse.json(task.runs.find((r) => r.id === key));
-      if (task.runs.some((r) => r.state === 'running'))
-        throw new AppError('RUN_ACTIVE', '请先结束当前运行。', 409);
+        key = z.uuid().parse(b.idempotencyKey),
+        base = idSchema.parse(b.base);
       const receiverId = b.connectionId !== undefined ? idSchema.parse(b.connectionId) : undefined;
-      const selected = connections().find((c) =>
-        receiverId !== undefined ? c.connectionId === receiverId : c.slot === slot,
-      );
-      if (!selected?.apiKey || !selected.model || !selected.enabled)
-        throw new AppError('MODEL_UNAVAILABLE', '接收连接未选择或已停用／删除，请重新选择。');
+      // Resolve legacy slot routing from the original run on replay. Availability
+      // belongs to startRun, after its fingerprint check, not before it.
+      const selectedId =
+        receiverId ??
+        getTask(taskId).runs.find((r) => r.id === key)?.roleAssignments?.a ??
+        connections().find((c) => c.slot === slot)?.connectionId ??
+        '';
       return NextResponse.json(
         startRun(
           taskId,
@@ -466,8 +500,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pat
             mode: 'live',
             contextMode: 'continue',
             slot,
-            roleAssignments: { a: selected.connectionId },
+            roleAssignments: { a: selectedId, b: selectedId },
             budget: null,
+            baseRevision: base,
           },
           key,
           text,
